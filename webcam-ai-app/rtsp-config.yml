@@ -1,0 +1,19 @@
+paths:
+  camera1:
+    source: publisher
+    readUser: admin
+    readPass: password
+    writeUser: admin
+    writePass: password
+  camera2:
+    source: publisher
+    readUser: admin
+    readPass: password
+    writeUser: admin
+    writePass: password
+
+protocols:
+  - tcp
+  - udp
+
+encryption: no

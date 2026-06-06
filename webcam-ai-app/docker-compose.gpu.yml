@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  rtsp-server:
+    image: aler9/rtsp-simple-server:latest
+    container_name: camera-ai-rtsp-server
+    ports:
+      - "8554:8554"
+      - "8888:8888"
+    environment:
+      - RTSP_PROTOCOLS=tcp
+    volumes:
+      - ./rtsp-config.yml:/config/rtsp-simple-server.yml
+    restart: unless-stopped
+    networks:
+      - camera-ai-network
+
+  rtsp-simulator:
+    build:
+      context: ./rtsp-simulator
+      dockerfile: Dockerfile
+    container_name: camera-ai-rtsp-simulator
+    depends_on:
+      - rtsp-server
+    environment:
+      - RTSP_URL=rtsp://rtsp-server:8554/camera1
+    restart: unless-stopped
+    networks:
+      - camera-ai-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: camera-ai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - camera-data:/app/data
+    restart: unless-stopped
+    networks:
+      - camera-ai-network
+
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile.gpu
+    container_name: camera-ai-service
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ai-models:/root/.cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - camera-ai-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: camera-ai-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+      - ai-service
+    restart: unless-stopped
+    networks:
+      - camera-ai-network
+
+volumes:
+  camera-data:
+  ai-models:
+
+networks:
+  camera-ai-network:
+    driver: bridge

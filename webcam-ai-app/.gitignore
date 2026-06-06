@@ -1,0 +1,33 @@
+# Virtual environment
+venv/
+.env
+.env.local
+
+# Frontend
+node_modules/
+dist/
+build/
+.cache/
+.vite/
+
+# Backend
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+
+# Docker
+docker-compose.override.yml
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
