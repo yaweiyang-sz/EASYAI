@@ -12,11 +12,6 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - camera-data:/app/data
-      - /run/udev:/run/udev:ro
-    devices:
-      - "/dev/video0:/dev/video0"
-      - "/dev/video1:/dev/video1"
-    privileged: true
     restart: unless-stopped
     networks:
       - camera-ai-network

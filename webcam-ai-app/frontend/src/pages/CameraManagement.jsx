@@ -6,6 +6,7 @@ function CameraManagement() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [showModal, setShowModal] = useState(false)
+  const [editingCamera, setEditingCamera] = useState(null)  // 新增：正在编辑的相机
   const [formData, setFormData] = useState({
     name: '',
     source: '',
@@ -57,8 +58,15 @@ function CameraManagement() {
     e.preventDefault()
     setSubmitting(true)
     try {
-      await cameraApi.create(formData)
+      if (editingCamera) {
+        // 更新现有相机
+        await cameraApi.update(editingCamera.id, formData)
+      } else {
+        // 添加新相机
+        await cameraApi.create(formData)
+      }
       setShowModal(false)
+      setEditingCamera(null)
       setFormData({ name: '', source: '', type: 'rtsp', enabled: true })
       loadCameras()
     } catch (err) {
@@ -70,7 +78,20 @@ function CameraManagement() {
 
   const openModal = () => {
     setShowModal(true)
+    setEditingCamera(null)  // 确保不是编辑模式
     setFormData({ name: '', source: '', type: 'rtsp', enabled: true })
+    loadDevices()
+  }
+
+  const handleEdit = (camera) => {
+    setEditingCamera(camera)
+    setShowModal(true)
+    setFormData({
+      name: camera.name,
+      source: camera.source,
+      type: camera.type,
+      enabled: camera.enabled
+    })
     loadDevices()
   }
 
@@ -123,6 +144,13 @@ function CameraManagement() {
                 </span>
                 <div className="camera-actions">
                   <button
+                    className="btn btn-primary"
+                    onClick={() => handleEdit(camera)}
+                    style={{ marginRight: '0.5rem' }}
+                  >
+                    Edit
+                  </button>
+                  <button
                     className="btn btn-danger"
                     onClick={() => handleDelete(camera.id)}
                   >
@@ -138,7 +166,7 @@ function CameraManagement() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>Add Camera</h2>
+            <h2>{editingCamera ? 'Edit Camera' : 'Add Camera'}</h2>
             <form onSubmit={handleSubmit}>
               <div className="form-group">
                 <label>Camera Name</label>
@@ -252,7 +280,10 @@ function CameraManagement() {
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  onClick={() => setShowModal(false)}
+                  onClick={() => {
+                    setShowModal(false)
+                    setEditingCamera(null)
+                  }}
                 >
                   Cancel
                 </button>
@@ -261,7 +292,7 @@ function CameraManagement() {
                   className="btn btn-primary"
                   disabled={submitting}
                 >
-                  {submitting ? 'Adding...' : 'Add Camera'}
+                  {submitting ? (editingCamera ? 'Updating...' : 'Adding...') : (editingCamera ? 'Update Camera' : 'Add Camera')}
                 </button>
               </div>
             </form>

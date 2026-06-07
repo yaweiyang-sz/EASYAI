@@ -1,0 +1,53 @@
+# 排除虚拟环境和缓存
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+
+# 排除构建和分发文件
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+
+# 排除虚拟环境
+venv
+.venv
+env
+ENV
+
+# 排除版本控制
+.git
+.gitignore
+.gitattributes
+
+# 排除 IDE 和编辑器文件
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 排除日志和数据库文件
+*.log
+*.pot
+*.db
+*.sqlite3
+
+# 排除文档和测试
+docs
+tests
+test
+
+# 排除 node_modules（如果有前端代码）
+node_modules
+
+# 排除其他服务（注意：保留 api 和 services 目录！）
+frontend
+rtsp-simulator
