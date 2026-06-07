@@ -1,0 +1,11 @@
+{
+  "cameras": [
+    {
+      "name": "Leon",
+      "source": "http://localhost:9000/stream/webcam0",
+      "type": "rtsp",
+      "enabled": true,
+      "id": "4cec0cee-4f0a-4ffe-914d-2941888ed895"
+    }
+  ]
+}

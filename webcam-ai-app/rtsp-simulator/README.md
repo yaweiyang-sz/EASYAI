@@ -16,7 +16,14 @@ A simple MJPEG server that provides video streams from two sources:
 ### Windows
 Double-click `start_camera_server.bat`
 
-### Command Line
+### Linux / Mac
+```bash
+cd rtsp-simulator
+chmod +x start_camera_server.sh
+./start_camera_server.sh
+```
+
+### Command Line (All Platforms)
 ```bash
 cd rtsp-simulator
 python camera_server.py
