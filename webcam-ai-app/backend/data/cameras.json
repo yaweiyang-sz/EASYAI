@@ -1,11 +1,18 @@
 {
   "cameras": [
     {
-      "name": "Leon",
-      "source": "http://localhost:9000/stream/webcam0",
+      "name": "Local Video",
+      "source": "http://host.docker.internal:9000/stream/localvideo0",
       "type": "rtsp",
       "enabled": true,
-      "id": "4cec0cee-4f0a-4ffe-914d-2941888ed895"
+      "id": "6e77113f-73fd-40de-984a-459d96a1a9dc"
+    },
+    {
+      "name": "Local Webcam",
+      "source": "http://host.docker.internal:9000/stream/webcam0",
+      "type": "rtsp",
+      "enabled": true,
+      "id": "f837253d-9cb5-4946-8702-aa396c6df4f2"
     }
   ]
 }

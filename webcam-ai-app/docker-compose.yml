@@ -11,10 +11,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      - camera-data:/app/data
+      - ./backend/data:/app/data
     restart: unless-stopped
     networks:
       - camera-ai-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   ai-service:
     build:
@@ -46,7 +48,6 @@ services:
       - camera-ai-network
 
 volumes:
-  camera-data:
   ai-models:
 
 networks:

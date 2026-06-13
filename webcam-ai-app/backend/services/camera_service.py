@@ -128,10 +128,16 @@ class CameraService:
                 if isinstance(source, str) and source.isdigit():
                     source = int(source)
             
+            # Set FFmpeg timeout for network streams (in microseconds)
+            if isinstance(source, str) and source.startswith('http'):
+                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'timeout;5000000'
+            
             cap = cv2.VideoCapture(source)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 return cap
+            else:
+                print(f"[WARN] Failed to open stream: {source}")
         except Exception as e:
             print(f"Error opening stream for camera {camera.id}: {e}")
         return None
@@ -237,6 +243,21 @@ class CameraService:
     # =========================================================================
     # Utility Functions
     # =========================================================================
+    
+    async def get_test_frame(self, camera_id: str) -> np.ndarray:
+        """Generate a simple test frame when stream is not available"""
+        height, width = 480, 640
+        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        frame[:, :] = (30, 40, 50)
+        
+        # Add camera ID
+        import datetime
+        cv2.putText(frame, f"Camera: {camera_id[:8]}...", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, datetime.datetime.now().strftime('%H:%M:%S'), (20, 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+        
+        return frame
     
     @staticmethod
     def frame_to_base64(frame) -> Optional[str]:
