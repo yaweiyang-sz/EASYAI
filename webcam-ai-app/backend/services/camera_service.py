@@ -128,11 +128,15 @@ class CameraService:
                 if isinstance(source, str) and source.isdigit():
                     source = int(source)
             
-            # Set FFmpeg timeout for network streams (in microseconds)
+            # Configure OpenCV for network streams
             if isinstance(source, str) and source.startswith('http'):
-                os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'timeout;5000000'
+                # Use CAP_FFMPEG backend with timeout for HTTP streams
+                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)  # 3 second connection timeout
+                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 1000)  # 1 second read timeout
+            else:
+                cap = cv2.VideoCapture(source)
             
-            cap = cv2.VideoCapture(source)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 return cap
@@ -149,12 +153,27 @@ class CameraService:
             return None
         
         async with self._lock:
-            if camera_id not in self.streams or not self.streams[camera_id].isOpened():
-                stream = self._open_stream(camera)
-                if stream:
-                    self.streams[camera_id] = stream
-                return stream
-            return self.streams[camera_id]
+            # Check if existing stream is still valid
+            if camera_id in self.streams:
+                stream = self.streams[camera_id]
+                if stream.isOpened():
+                    # Quick check if stream is responsive
+                    ret = stream.grab()  # Non-blocking frame grab
+                    if ret:
+                        return stream
+                    else:
+                        # Stream is not responsive, release and recreate
+                        print(f"[INFO] Stream {camera_id} not responsive, reconnecting...")
+                        stream.release()
+                        del self.streams[camera_id]
+                else:
+                    del self.streams[camera_id]
+            
+            # Open new stream
+            stream = self._open_stream(camera)
+            if stream:
+                self.streams[camera_id] = stream
+            return stream
     
     async def release_stream(self, camera_id: str):
         """Release stream for camera"""
