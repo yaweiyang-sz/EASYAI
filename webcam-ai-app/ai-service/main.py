@@ -73,7 +73,12 @@ async def process_image(
     image: UploadFile = File(...),
     camera_id: str = Query(...),
     algorithm: AlgorithmType = Query(AlgorithmType.OBJECT_DETECTION),
-    confidence: float = Query(0.5, ge=0.0, le=1.0)
+    confidence: float = Query(0.5, ge=0.0, le=1.0),
+    roi_x1: Optional[float] = Query(None),
+    roi_y1: Optional[float] = Query(None),
+    roi_x2: Optional[float] = Query(None),
+    roi_y2: Optional[float] = Query(None),
+    classes: Optional[str] = Query(None)
 ):
     if not image.content_type or not image.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -89,12 +94,22 @@ async def process_image(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decode image: {str(e)}")
 
+    # Parse classes filter
+    class_filter = None
+    if classes:
+        class_filter = [c.strip() for c in classes.split(',')]
+
+    # Parse ROI
+    roi = None
+    if all(v is not None for v in [roi_x1, roi_y1, roi_x2, roi_y2]):
+        roi = [roi_x1, roi_y1, roi_x2, roi_y2]
+
     detections = []
     classifications = []
     annotated_frame = None
 
     if algorithm == AlgorithmType.OBJECT_DETECTION:
-        detections, annotated_frame = detector.detect(frame, confidence)
+        detections, annotated_frame = detector.detect(frame, confidence, roi, class_filter)
     elif algorithm == AlgorithmType.CLASSIFICATION:
         classifications, annotated_frame = classifier.classify(frame)
 

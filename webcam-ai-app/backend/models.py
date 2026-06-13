@@ -1,5 +1,20 @@
 from pydantic import BaseModel
-from typing import Optional, Literal
+from typing import Optional, Literal, List
+
+class ROI(BaseModel):
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+class AlgorithmConfig(BaseModel):
+    id: str
+    name: str
+    algorithm_type: Literal["object_detection", "classification"]
+    enabled: bool = True
+    confidence: float = 0.5
+    roi: Optional[ROI] = None
+    classes: List[str] = []
 
 class CameraBase(BaseModel):
     name: str
@@ -15,17 +30,11 @@ class CameraUpdate(BaseModel):
     source: Optional[str] = None
     type: Optional[Literal["rtsp", "usb", "integrated"]] = None
     enabled: Optional[bool] = None
+    algorithms: Optional[List[AlgorithmConfig]] = None
 
 class Camera(CameraBase):
     id: str
-
-    class Config:
-        from_attributes = True
-
-class AlgorithmConfig(BaseModel):
-    algorithm_id: str
-    enabled: bool = True
-    params: dict = {}
+    algorithms: List[AlgorithmConfig] = []
 
 class StreamFrame(BaseModel):
     frame: str

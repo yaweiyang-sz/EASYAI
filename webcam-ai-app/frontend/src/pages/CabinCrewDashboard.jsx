@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { AlertTriangle, Shield, ShieldOff, Video, Users, PlaneTakeoff, Plane, ShieldAlert, CheckCircle, Clock, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Shield, ShieldOff, Video, Users, PlaneTakeoff, Plane, ShieldAlert, CheckCircle, Clock, Wifi, WifiOff, Maximize2 } from 'lucide-react';
 import { io } from 'socket.io-client';
+import { useNavigate } from 'react-router-dom';
 import { cameraApi } from '../services/api';
 
 const INITIAL_ALERTS = [
@@ -41,6 +42,7 @@ const MOVING_PASSENGERS = [
 ];
 
 export default function CabinCrewDashboard() {
+  const navigate = useNavigate();
   const [flightMode, setFlightMode] = useState('cruise');
   const [anonymize, setAnonymize] = useState(true);
   const [alerts, setAlerts] = useState(INITIAL_ALERTS);
@@ -199,7 +201,11 @@ export default function CabinCrewDashboard() {
               </div>
             ) : (
               cameras.map((camera, index) => (
-                <div key={camera.id} className="bg-black rounded-lg border border-slate-700 relative overflow-hidden">
+                <div 
+                  key={camera.id} 
+                  className="bg-black rounded-lg border border-slate-700 relative overflow-hidden cursor-pointer hover:border-blue-500 transition-colors"
+                  onClick={() => navigate(`/camera/${camera.id}`)}
+                >
                   {/* 16:9 aspect ratio container */}
                   <div className="aspect-video w-full bg-slate-900">
                     {camera.enabled ? (
@@ -228,6 +234,16 @@ export default function CabinCrewDashboard() {
                   <div className="absolute top-1.5 right-1.5 bg-black/60 px-1.5 py-0.5 rounded text-[8px] text-slate-300">
                     {camera.type.toUpperCase()}
                   </div>
+                  <button 
+                    className="absolute bottom-1.5 left-1.5 bg-blue-600/80 hover:bg-blue-500 p-1 rounded transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate(`/camera/${camera.id}`);
+                    }}
+                    title="Open camera view"
+                  >
+                    <Maximize2 className="w-3 h-3 text-white" />
+                  </button>
                 </div>
               ))
             )}

@@ -11,7 +11,7 @@ import json
 import os
 import numpy as np
 from typing import Dict, Optional, Callable, Any
-from models import Camera, CameraCreate, CameraUpdate
+from models import Camera, CameraCreate, CameraUpdate, AlgorithmConfig
 
 
 class CameraService:
@@ -108,8 +108,13 @@ class CameraService:
                 return None
             camera = self.cameras[camera_id]
             update_dict = update_data.model_dump(exclude_unset=True)
+            
             for key, value in update_dict.items():
-                setattr(camera, key, value)
+                if key == 'algorithms' and value is not None:
+                    camera.algorithms = [AlgorithmConfig(**algo) for algo in value]
+                else:
+                    setattr(camera, key, value)
+            
             self._save_cameras()
             return camera
     

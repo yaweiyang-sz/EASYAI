@@ -51,12 +51,23 @@ export const aiApi = {
 
   getAlgorithm: (id) => fetchWithError(`${AI_API_BASE}/algorithms/${id}`),
 
-  processImage: async (imageFile, cameraId, algorithm, confidence = 0.5) => {
+  processImage: async (imageFile, cameraId, algorithm, confidence = 0.5, roi = null, classes = []) => {
     const formData = new FormData();
     formData.append('image', imageFile);
     formData.append('camera_id', cameraId);
     formData.append('algorithm', algorithm);
     formData.append('confidence', confidence.toString());
+    
+    if (roi) {
+      formData.append('roi_x1', roi.x1.toString());
+      formData.append('roi_y1', roi.y1.toString());
+      formData.append('roi_x2', roi.x2.toString());
+      formData.append('roi_y2', roi.y2.toString());
+    }
+    
+    if (classes && classes.length > 0) {
+      formData.append('classes', classes.join(','));
+    }
 
     return fetchWithError(`${AI_API_BASE}/process`, {
       method: 'POST',
