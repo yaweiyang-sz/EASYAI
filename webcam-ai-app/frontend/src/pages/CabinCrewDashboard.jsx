@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AlertTriangle, Shield, ShieldOff, Video, Users, PlaneTakeoff, Plane, ShieldAlert, CheckCircle, Clock, Wifi, WifiOff, Maximize2 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +9,8 @@ const INITIAL_ALERTS = [
   { id: 2, time: '11:45', type: 'suspicious', message: 'Passenger 37A moved to First Class.', resolved: true },
   { id: 3, time: '11:31', type: 'wellbeing', message: 'Lavatory A elapsed time over 20 minutes.', resolved: false },
 ];
+
+const API_BASE = '/api';
 
 const generatePassengerData = () => {
   const data = {};
@@ -51,6 +53,8 @@ export default function CabinCrewDashboard() {
   const [passengers, setPassengers] = useState(PASSENGER_DATA);
   const [cameras, setCameras] = useState([]);
   const [loadingCameras, setLoadingCameras] = useState(false);
+  const [detectionAlerts, setDetectionAlerts] = useState({});
+  const eventSourceRef = useRef(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -99,6 +103,12 @@ export default function CabinCrewDashboard() {
         setLoadingCameras(true);
         const data = await cameraApi.list();
         setCameras(data);
+        
+        data.forEach(camera => {
+          if (camera.algorithms && camera.algorithms.some(a => a.enabled)) {
+            startDetectionStream(camera.id);
+          }
+        });
       } catch (err) {
         console.error('Failed to load cameras:', err);
       } finally {
@@ -106,7 +116,88 @@ export default function CabinCrewDashboard() {
       }
     };
     loadCameras();
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
   }, []);
+
+  const startDetectionStream = (cameraId) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    try {
+      const url = `${API_BASE}/stream/${cameraId}/events`;
+      eventSourceRef.current = new EventSource(url);
+      eventSourceRef.current.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleDetectionEvent(data);
+        } catch (err) {
+          console.error('Failed to parse detection event:', err);
+        }
+      };
+      eventSourceRef.current.onerror = (error) => {
+        console.error('EventSource error:', error);
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+      };
+    } catch (err) {
+      console.error('Failed to start detection stream:', err);
+    }
+  };
+
+  const handleDetectionEvent = (data) => {
+    const { camera_id, detections } = data;
+    const camera = cameras.find(c => c.id === camera_id);
+    const cameraName = camera?.name || 'Unknown Camera';
+
+    if (detections && detections.length > 0) {
+      setDetectionAlerts(prev => {
+        const updated = { ...prev };
+        
+        detections.forEach(det => {
+          const key = `${camera_id}-${det.label}`;
+          const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          
+          if (updated[key]) {
+            updated[key] = {
+              ...updated[key],
+              time: now,
+              confidence: det.confidence,
+              count: updated[key].count + 1
+            };
+          } else {
+            updated[key] = {
+              id: key,
+              cameraId: camera_id,
+              cameraName,
+              label: det.label,
+              confidence: det.confidence,
+              time: now,
+              count: 1,
+              resolved: false
+            };
+          }
+        });
+        
+        return updated;
+      });
+    }
+  };
+
+  const resolveDetectionAlert = (key) => {
+    setDetectionAlerts(prev => {
+      const updated = { ...prev };
+      if (updated[key]) {
+        updated[key].resolved = true;
+      }
+      return updated;
+    });
+  };
 
   const resolveAlert = (id) => {
     setAlerts(alerts.map(a => a.id === id ? { ...a, resolved: true } : a));
@@ -565,6 +656,58 @@ export default function CabinCrewDashboard() {
                 </div>
               );
             })}
+
+            {Object.values(detectionAlerts).length > 0 && (
+              <div className="border-t border-slate-700 pt-3 mt-3">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center">
+                  <Users className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
+                  AI Detection Events
+                </h3>
+                {Object.values(detectionAlerts).map((det) => (
+                  <div 
+                    key={det.id} 
+                    className={`p-3 rounded-lg border transition-all ${
+                      det.resolved 
+                        ? "bg-slate-900 border-slate-700 opacity-60" 
+                        : "bg-blue-900/20 border-blue-500/50 shadow-[0_0_10px_rgba(59,130,246,0.1)]"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start mb-1.5">
+                      <div className="flex items-center space-x-1.5">
+                        <Users className={`w-4 h-4 ${det.resolved ? 'text-slate-500' : 'text-blue-400'}`} />
+                        <span className={`text-xs font-bold uppercase tracking-wider ${det.resolved ? 'text-slate-500' : 'text-blue-400'}`}>
+                          Detection
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{det.time}</span>
+                    </div>
+                    <p className={`text-xs mb-2 leading-snug ${det.resolved ? 'text-slate-400' : 'text-slate-200'}`}>
+                      <span className="font-semibold">{det.label}</span> detected by {det.cameraName}
+                    </p>
+                    <div className="flex items-center justify-between text-[10px] mb-2">
+                      <span className="text-slate-400">Confidence: {(det.confidence * 100).toFixed(0)}%</span>
+                      <span className="text-slate-500">Count: {det.count}</span>
+                    </div>
+
+                    {!det.resolved && (
+                      <div className="flex space-x-2 mt-auto">
+                        <button
+                          onClick={() => resolveDetectionAlert(det.id)}
+                          className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center active:scale-95"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Acknowledge
+                        </button>
+                      </div>
+                    )}
+                    {det.resolved && (
+                      <div className="text-[10px] text-slate-500 flex items-center mt-auto">
+                        <CheckCircle className="w-3 h-3 mr-1" /> Handled by Crew
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { cameraApi, aiApi } from '../services/api'
 
+const API_BASE = '/api';
+
 function CameraView() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -18,8 +20,11 @@ function CameraView() {
   const [roiStart, setRoiStart] = useState(null)
   const [roiEnd, setRoiEnd] = useState(null)
   const [imageSize, setImageSize] = useState({ width: 640, height: 480 })
+  const [streamingDetections, setStreamingDetections] = useState([])
+  const [isStreaming, setIsStreaming] = useState(false)
   const videoRef = useRef(null)
   const containerRef = useRef(null)
+  const eventSourceRef = useRef(null)
 
   useEffect(() => {
     loadCamera()
@@ -29,8 +34,71 @@ function CameraView() {
       setRoiMode(false)
       setRoiStart(null)
       setRoiEnd(null)
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+      }
     }
   }, [id])
+
+  useEffect(() => {
+    const enabledAlgo = camera?.algorithms?.find(a => a.enabled)
+    if (enabledAlgo && !isStreaming) {
+      startDetectionStream()
+    } else if (!enabledAlgo && isStreaming) {
+      stopDetectionStream()
+    }
+  }, [camera?.algorithms, isStreaming])
+
+  useEffect(() => {
+    if (selectedAlgoConfig?.enabled && !isStreaming) {
+      startDetectionStream()
+    } else if (!selectedAlgoConfig?.enabled && isStreaming) {
+      stopDetectionStream()
+    }
+  }, [selectedAlgoConfig?.enabled])
+
+  const startDetectionStream = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+    }
+    
+    try {
+      const url = `${API_BASE}/stream/${id}/events`
+      eventSourceRef.current = new EventSource(url)
+      eventSourceRef.current.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          handleDetectionMessage(data)
+        } catch (err) {
+          console.error('Failed to parse detection event:', err)
+        }
+      }
+      eventSourceRef.current.onerror = (error) => {
+        console.error('EventSource error:', error)
+        eventSourceRef.current?.close()
+        eventSourceRef.current = null
+      }
+      setIsStreaming(true)
+      console.log('Detection stream started')
+    } catch (err) {
+      console.error('Failed to start detection stream:', err)
+    }
+  }
+
+  const stopDetectionStream = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
+    setIsStreaming(false)
+    setStreamingDetections([])
+    console.log('Detection stream stopped')
+  }
+
+  const handleDetectionMessage = (data) => {
+    const { detections } = data
+    setStreamingDetections(detections || [])
+  }
 
   useEffect(() => {
     if (selectedAlgoConfig) {
@@ -550,6 +618,38 @@ function CameraView() {
               )}
             </div>
           )}
+
+          <div className="detection-messages-panel">
+            <div className="panel-header">
+              <h3>Detection Messages</h3>
+              <div className="stream-status">
+                <span className={`status-indicator ${isStreaming ? 'active' : 'inactive'}`}></span>
+                {isStreaming ? 'Live' : 'Stopped'}
+              </div>
+            </div>
+            
+            {streamingDetections.length > 0 ? (
+              <div className="current-detections">
+                <h4>Current Detection</h4>
+                <div className="detections-list">
+                  {streamingDetections.map((det, idx) => (
+                    <div key={`current-${idx}`} className="detection-item current">
+                      <div className="detection-info">
+                        <span className="detection-label">{det.label}</span>
+                        <span className="detection-confidence">
+                          {(det.confidence * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="empty-messages">
+                {isStreaming ? 'Waiting for detections...' : 'Detection stream is stopped'}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
