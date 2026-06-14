@@ -2,33 +2,20 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import asyncio
 import cv2
-import time
 import numpy as np
 from services.camera_service import camera_service
 
 router = APIRouter(prefix="/api/stream", tags=["stream"])
 
-async def generate_frames(camera_id: str, use_ai: bool = False, ai_service_url: str = None):
-    use_test_frame = False
-    
-    while True:
-        stream = None
-        
-        if not use_test_frame:
-            stream = await camera_service.get_stream(camera_id)
-        
-        if stream is None:
-            use_test_frame = True
-        
-        try:
-            if use_test_frame:
-                frame = await camera_service.get_test_frame(camera_id)
-            else:
-                ret, frame = stream.read()
-                if not ret:
-                    use_test_frame = True
-                    frame = await camera_service.get_test_frame(camera_id)
 
+async def generate_frames(camera_id: str, use_ai: bool = False, ai_service_url: str = None):
+    while True:
+        try:
+            frame = await camera_service.get_frame(camera_id, timeout=1.0)
+            
+            if frame is None:
+                frame = await camera_service.get_test_frame(camera_id)
+            
             frame = camera_service.resize_frame(frame)
 
             if use_ai and ai_service_url:
@@ -55,6 +42,7 @@ async def generate_frames(camera_id: str, use_ai: bool = False, ai_service_url: 
 
             ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ret:
+                await asyncio.sleep(0.033)
                 continue
 
             yield (b'--frame\r\n'
@@ -62,9 +50,11 @@ async def generate_frames(camera_id: str, use_ai: bool = False, ai_service_url: 
 
         except Exception as e:
             print(f"Stream error: {e}")
-            break
+            await asyncio.sleep(1.0)
+            continue
 
         await asyncio.sleep(0.033)
+
 
 @router.get("/{camera_id}")
 async def stream_video(camera_id: str, use_ai: bool = False, ai_url: str = None):
@@ -72,10 +62,13 @@ async def stream_video(camera_id: str, use_ai: bool = False, ai_url: str = None)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
+    await camera_service.start_stream(camera_id)
+
     return StreamingResponse(
         generate_frames(camera_id, use_ai, ai_url),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
 
 @router.get("/{camera_id}/snapshot")
 async def get_snapshot(camera_id: str):
@@ -83,13 +76,9 @@ async def get_snapshot(camera_id: str):
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
 
-    stream = await camera_service.get_stream(camera_id)
+    frame = await camera_service.get_frame(camera_id, timeout=2.0)
     
-    if stream is not None:
-        ret, frame = stream.read()
-        if not ret:
-            frame = await camera_service.get_test_frame(camera_id)
-    else:
+    if frame is None:
         frame = await camera_service.get_test_frame(camera_id)
 
     frame = camera_service.resize_frame(frame)
@@ -97,3 +86,13 @@ async def get_snapshot(camera_id: str):
 
     from fastapi.responses import Response
     return Response(content=buffer.tobytes(), media_type="image/jpeg")
+
+
+@router.get("/{camera_id}/status")
+async def get_stream_status(camera_id: str):
+    camera = await camera_service.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+
+    status = await camera_service.get_connection_status(camera_id)
+    return {"camera_id": camera_id, "status": status}

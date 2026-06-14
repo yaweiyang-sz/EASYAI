@@ -24,6 +24,12 @@ function CameraView() {
   useEffect(() => {
     loadCamera()
     loadAlgorithms()
+    
+    return () => {
+      setRoiMode(false)
+      setRoiStart(null)
+      setRoiEnd(null)
+    }
   }, [id])
 
   useEffect(() => {

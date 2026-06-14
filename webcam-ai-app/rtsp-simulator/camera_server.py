@@ -43,6 +43,27 @@ class VideoStreamSource:
         if self.thread:
             self.thread.join(timeout=1)
     
+    def _generate_test_frame(self):
+        """Generate a test frame when stream is not available"""
+        height, width = 480, 640
+        frame = np.zeros((height, width, 3), dtype=np.uint8)
+        frame[:, :] = (30, 40, 50)
+        
+        cv2.putText(frame, f"Source: {self.name}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, datetime.datetime.now().strftime('%H:%M:%S'), (20, 80), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+        
+        if not self.connected:
+            status_text = "Status: Disconnected"
+            cv2.putText(frame, status_text, (20, 120), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 100), 1)
+            if self.error_message:
+                cv2.putText(frame, f"Error: {self.error_message[:30]}...", (20, 145), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 100, 100), 1)
+        
+        return frame
+    
     def get_frame_jpeg(self):
         """Get current frame as JPEG bytes"""
         with self.frame_lock:
@@ -51,6 +72,12 @@ class VideoStreamSource:
                                            [cv2.IMWRITE_JPEG_QUALITY, 80])
                 if ret:
                     return buffer.tobytes()
+        
+        # Return test frame if no actual frame available
+        test_frame = self._generate_test_frame()
+        ret, buffer = cv2.imencode('.jpg', test_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ret:
+            return buffer.tobytes()
         return None
     
     def get_status(self):
@@ -72,28 +99,46 @@ class LocalVideoStream(VideoStreamSource):
         self.video_path = video_path
         self.cap = None
     
+    def _try_open_video(self):
+        """Try to open video file in a separate thread"""
+        try:
+            if not os.path.exists(self.video_path):
+                self.connected = False
+                self.error_message = f"Video file not found: {self.video_path}"
+                print(f"[ERROR] {self.error_message}")
+                return
+            
+            cap = cv2.VideoCapture(self.video_path)
+            if not cap.isOpened():
+                self.connected = False
+                self.error_message = f"Cannot open video file: {self.video_path}"
+                print(f"[ERROR] {self.error_message}")
+                return
+            
+            self.cap = cap
+            self.connected = True
+            print(f"[OK] Local video opened: {self.video_path}")
+            
+            # Start frame reading thread
+            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread.start()
+        except Exception as e:
+            self.connected = False
+            self.error_message = f"Video error: {e}"
+            print(f"[ERROR] {self.error_message}")
+    
     def start(self):
-        """Start video stream"""
+        """Start video stream with timeout protection"""
         self.running = True
         
-        if not os.path.exists(self.video_path):
-            self.connected = False
-            self.error_message = f"Video file not found: {self.video_path}"
-            print(f"[ERROR] {self.error_message}")
-            return
+        # Try to open video in a separate thread to avoid blocking
+        open_thread = threading.Thread(target=self._try_open_video, daemon=True)
+        open_thread.start()
+        open_thread.join(timeout=5.0)  # Wait max 5 seconds
         
-        self.cap = cv2.VideoCapture(self.video_path)
-        if not self.cap.isOpened():
-            self.connected = False
-            self.error_message = f"Cannot open video file: {self.video_path}"
-            print(f"[ERROR] {self.error_message}")
-            return
-        
-        self.connected = True
-        print(f"[OK] Local video opened: {self.video_path}")
-        
-        self.thread = threading.Thread(target=self._loop, daemon=True)
-        self.thread.start()
+        if not self.connected:
+            self.error_message = self.error_message or f"Video connection timeout: {self.video_path}"
+            print(f"[WARN] {self.error_message}")
     
     def stop(self):
         """Stop video stream"""
@@ -134,22 +179,40 @@ class WebcamStream(VideoStreamSource):
         self.device_index = device_index
         self.cap = None
     
+    def _try_open_webcam(self):
+        """Try to open webcam in a separate thread with timeout"""
+        try:
+            # Set backend to DirectShow on Windows for faster failure
+            cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                self.cap = cap
+                self.connected = True
+                print(f"[OK] Webcam opened: device {self.device_index}")
+                
+                # Start frame reading thread
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
+            else:
+                self.connected = False
+                self.error_message = f"Cannot open webcam: device {self.device_index}"
+                print(f"[WARN] {self.error_message}")
+        except Exception as e:
+            self.connected = False
+            self.error_message = f"Webcam error: {e}"
+            print(f"[ERROR] {self.error_message}")
+    
     def start(self):
-        """Start webcam stream"""
+        """Start webcam stream with timeout protection"""
         self.running = True
         
-        self.cap = cv2.VideoCapture(self.device_index)
-        if not self.cap.isOpened():
-            self.connected = False
-            self.error_message = f"Cannot open webcam: device {self.device_index}"
-            print(f"[ERROR] {self.error_message}")
-            return
+        # Try to open webcam in a separate thread to avoid blocking
+        open_thread = threading.Thread(target=self._try_open_webcam, daemon=True)
+        open_thread.start()
+        open_thread.join(timeout=3.0)  # Wait max 3 seconds
         
-        self.connected = True
-        print(f"[OK] Webcam opened: device {self.device_index}")
-        
-        self.thread = threading.Thread(target=self._loop, daemon=True)
-        self.thread.start()
+        if not self.connected:
+            self.error_message = self.error_message or f"Webcam connection timeout: device {self.device_index}"
+            print(f"[WARN] {self.error_message}")
     
     def stop(self):
         """Stop webcam stream"""
@@ -163,20 +226,28 @@ class WebcamStream(VideoStreamSource):
         """Read frames in loop"""
         frame_delay = 1.0 / self.fps
         
-        while self.running and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            
-            if not ret:
-                time.sleep(0.1)
+        while self.running:
+            if not self.cap or not self.cap.isOpened():
+                time.sleep(frame_delay)
                 continue
             
-            # Resize to standard size
-            if frame.shape[1] != 640 or frame.shape[0] != 480:
-                frame = cv2.resize(frame, (640, 480))
-            
-            with self.frame_lock:
-                self.current_frame = frame.copy()
-            self.frame_count += 1
+            try:
+                ret, frame = self.cap.read()
+                
+                if not ret:
+                    time.sleep(0.1)
+                    continue
+                
+                # Resize to standard size
+                if frame.shape[1] != 640 or frame.shape[0] != 480:
+                    frame = cv2.resize(frame, (640, 480))
+                
+                with self.frame_lock:
+                    self.current_frame = frame.copy()
+                self.frame_count += 1
+                
+            except Exception as e:
+                print(f"[ERROR] Webcam read error: {e}")
             
             time.sleep(frame_delay)
 
