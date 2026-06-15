@@ -2,9 +2,9 @@
   "cameras": [
     {
       "name": "Local Webcam",
-      "source": "http://192.168.3.17:9000/stream/webcam0",
+      "source": "rtsp://admin:airbus.123@192.168.10.202:554/video1",
       "type": "rtsp",
-      "enabled": true,
+      "enabled": false,
       "id": "f837253d-9cb5-4946-8702-aa396c6df4f2",
       "algorithms": [
         {
