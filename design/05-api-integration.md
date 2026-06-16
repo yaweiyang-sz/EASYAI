@@ -1,12 +1,84 @@
 # API Integration Documentation
 
-This document provides complete API interface specifications for the Algorithm Team to integrate with the system.
+This document provides complete API interface specifications for:
+1. **Algorithm Team** - Integration with AI Service
+2. **Frontend Team** - Integration with Backend Service
 
 ---
 
-## 1. Service Information
+## 1. Backend Streaming API (Frontend Integration)
 
-### 1.1 Service Address
+### 1.1 WebSocket Stream Endpoint (Primary)
+
+**Endpoint**: `WebSocket /api/stream/{camera_id}/ws`
+
+**Purpose**: Real-time video stream with AI detection results bundled in one message.
+
+**Connection URL**:
+```
+ws://localhost:8000/api/stream/{camera_id}/ws
+wss://production/api/stream/{camera_id}/ws
+```
+
+**Message Format** (Server → Client):
+
+```json
+{
+  "type": "frame",
+  "camera_id": "camera_001",
+  "frame": "base64_encoded_jpeg...",
+  "detections": [
+    {"label": "person", "confidence": 0.95, "bbox": [x1, y1, x2, y2]}
+  ],
+  "annotated_frame": "base64_encoded_jpeg_with_boxes...",
+  "timestamp": 1718001234.567
+}
+```
+
+**Client → Server Messages**:
+
+| Type | Description |
+|------|-------------|
+| `ping` | Keep-alive ping, server responds with `pong` |
+| Any other | Ignored |
+
+**Auto-Reconnect**: Frontend should implement reconnection logic with exponential backoff.
+
+**Example** (JavaScript):
+```javascript
+const ws = new WebSocket('ws://localhost:8000/api/stream/camera_001/ws');
+
+ws.onopen = () => console.log('Connected');
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'frame' && data.frame) {
+    // Render video frame
+    renderFrame(data.frame);
+    // Update detections
+    updateDetections(data.detections);
+  }
+};
+
+ws.onclose = () => {
+  // Reconnect after delay
+  setTimeout(() => connect(), 3000);
+};
+```
+
+### 1.2 Legacy Endpoints (Backward Compatibility)
+
+| Endpoint | Method | Description | Use Case |
+|----------|--------|-------------|----------|
+| `/api/stream/{id}` | GET | MJPEG stream | Not recommended |
+| `/api/stream/{id}/snapshot` | GET | Single frame JPEG | Camera thumbnails |
+| `/api/stream/{id}/events` | GET | SSE detection events | Legacy frontend |
+| `/api/stream/{id}/detections` | GET | Current detections | Polling fallback |
+
+---
+
+## 2. AI Service API (Algorithm Team Integration)
+
+### 2.1 Service Address
 
 | Environment | AI Service Address | Port |
 |-------------|-------------------|------|
@@ -26,7 +98,7 @@ This document provides complete API interface specifications for the Algorithm T
 
 ---
 
-## 2. Detailed Interface Specifications
+## 3. Detailed Interface Specifications
 
 ### 2.1 Health Check
 
@@ -116,7 +188,7 @@ This document provides complete API interface specifications for the Algorithm T
 
 ---
 
-### 2.4 Process Image (Core Interface)
+### 3.4 Process Image (Core Interface)
 
 **Endpoint**: `POST /api/process`
 
@@ -211,7 +283,7 @@ curl -X POST "http://localhost:8001/api/process" \
 
 ---
 
-## 3. Data Format Details
+## 4. Data Format Details
 
 ### 3.1 Bounding Box Format
 
@@ -350,7 +422,7 @@ async function processImage(
 }
 ```
 
-### 4.3 cURL Examples
+### 5.3 cURL Examples
 
 ```bash
 # Object Detection
@@ -425,7 +497,7 @@ curl -X POST "http://localhost:8001/api/process" \
 
 ---
 
-## 7. Change Log
+## 8. Change Log
 
 | Version | Date | Changes |
 |---------|------|---------|

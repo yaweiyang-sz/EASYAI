@@ -18,122 +18,172 @@ This document presents UML sequence diagrams for core business processes, intend
 
 ## 1. Video Stream Processing
 
-### 1.1 Real-time Video Stream Retrieval
+### 1.1 Real-time Video Stream via WebSocket
 
 ```mermaid
 sequenceDiagram
-    title Real-time Video Stream Retrieval Flow
+    title Real-time Video Stream via WebSocket
     actor User
     participant Frontend
     participant Backend
     participant "RTSP Camera"
-    participant "Camera Service"
+    participant "AI Service"
 
-    User->>Frontend: Access camera detail page
-    Frontend->>Backend: GET /stream/{camera_id}
-    Backend->>"Camera Service": start_stream(camera_id)
-    "Camera Service"->>"RTSP Camera": Establish RTSP connection
-    "RTSP Camera"-->>"Camera Service": Video stream
-    "Camera Service"->>Backend: Continuous frame return
-    Backend->>Backend: Frame preprocessing
-    Backend-->>Frontend: multipart/x-mixed-replace (MJPEG)
-    Frontend->>Frontend: Render video
+    User->>Frontend: Access dashboard
+    Frontend->>Backend: WebSocket /api/stream/{camera_id}/ws
+    Backend->>"RTSP Camera": Establish RTSP connection
+    "RTSP Camera"-->>Backend: Video stream
+    Backend->>Backend: frame_grabber_task (30fps loop)
+    Backend->>"AI Service": Call /api/process (2Hz)
+    "AI Service"-->>Backend: detections + annotated_frame
+    Backend->>Backend: Bundle frame + detections
+    Backend-->>Frontend: WebSocket: {type: "frame", frame: base64, detections: [...]}
+    Frontend->>Frontend: Render video with overlay
 ```
 
 ### 1.2 Video Frame Processing Flow
 
 ```mermaid
 sequenceDiagram
-    title Video Frame Processing
+    title Video Frame Processing & AI Detection
     participant "RTSP Stream"
-    participant "CameraService"
+    participant "Backend"
     participant "AI Service"
-    participant "Annotated Frame"
+    participant Frontend
 
-    "RTSP Stream"->>"CameraService": Get raw frame
-    "CameraService"->>"CameraService": resize_frame() (scale to fixed resolution)
-    alt AI detection enabled
-        "CameraService"->>"AI Service": POST /api/process (image, camera_id, algorithm)
-        "AI Service"->>"AI Service": YOLOv8 inference
-        "AI Service"-->>"CameraService": detections + annotated_frame
-    end
-    "CameraService"->>"CameraService": Encode to JPEG
-    "CameraService"-->>Frontend: StreamingResponse
+    "RTSP Stream"->>"Backend": Raw frame (continuous)
+    "Backend"->>"Backend": frame_grabber_task (30fps)
+    "Backend"->>"Backend": Resize frame (fixed resolution)
+    
+    "Backend"->>"AI Service": POST /api/process (every 0.5s)
+    "AI Service"->>"AI Service": YOLOv8 inference
+    "AI Service"-->>"Backend": detections + annotated_frame
+    
+    "Backend"->>"Backend": Bundle frame + detections
+    "Backend"->>Frontend: WebSocket message (JSON)
+    Note over Frontend: Message format:<br/>{type: "frame", frame: base64,<br/>detections: [...], annotated_frame: base64}
+```
+
+### 1.3 Legacy MJPEG Endpoint (Backward Compatibility)
+
+```mermaid
+sequenceDiagram
+    title Legacy MJPEG Stream (HTTP)
+    participant Frontend
+    participant Backend
+    participant "RTSP Camera"
+
+    Frontend->>Backend: GET /api/stream/{camera_id}
+    Backend->>"RTSP Camera": Establish RTSP connection
+    "RTSP Camera"-->>Backend: Video stream
+    Backend-->>Frontend: multipart/x-mixed-replace (MJPEG)
+    Note over Frontend: Not recommended - use WebSocket instead
 ```
 
 ---
 
 ## 2. AI Detection Flow
 
-### 2.1 Single Frame AI Analysis
+### 2.1 Backend-Initiated AI Detection (Primary)
+
+> **Note:** The backend internally calls the AI service at 2Hz (every 500ms) and bundles results with video frames. Frontend does NOT need to make direct AI calls for real-time detection.
 
 ```mermaid
 sequenceDiagram
-    title Single Frame AI Analysis Flow
+    title Backend-Initiated AI Detection
+    participant Frontend
+    participant Backend
+    participant "AI Service"
+    participant "YOLO Model"
+
+    Frontend->>Backend: Connect WebSocket
+    loop Continuous (30fps)
+        Backend->>Backend: frame_grabber_task
+    end
+    loop AI Detection (2Hz)
+        Backend->>"AI Service": POST /api/process (with ROI, classes filter)
+        "AI Service"->>"YOLO Model": model(frame)
+        "YOLO Model"-->>"AI Service": Detection results
+        "AI Service"-->>Backend: {detections, annotated_frame}
+        Backend->>Backend: Update latest_detections
+    end
+    Backend-->>Frontend: WebSocket: {frame, detections}
+    Frontend->>Frontend: Update UI
+```
+
+### 2.2 Single Frame AI Analysis (On-Demand)
+
+> For manual "Capture & Analyze" functionality.
+
+```mermaid
+sequenceDiagram
+    title Single Frame AI Analysis (On-Demand)
     actor User
     participant Frontend
     participant "AI Service"
     participant "YOLO Model"
 
     User->>Frontend: Click "Capture & Analyze"
-    Frontend->>Frontend: canvas.toBlob() (get current frame from video element)
-    Frontend->>"AI Service": POST /api/process (image, camera_id, algorithm, confidence)
-    "AI Service"->>"AI Service": Parse image
+    Frontend->>Frontend: Get current frame from video element
+    Frontend->>"AI Service": POST /api/process (image, algorithm, confidence, roi)
     "AI Service"->>"YOLO Model": model(frame)
     "YOLO Model"-->>"AI Service": Detection/classification results
     "AI Service"->>"AI Service": Generate annotated image (base64)
-    "AI Service"-->>Frontend: ProcessResponse (detections, classifications, annotated_frame)
+    "AI Service"-->>Frontend: {detections, classifications, annotated_frame, processing_time_ms}
     Frontend->>Frontend: Display results
-
-    Note over Frontend: Display content:<br/>- Processing time<br/>- Detected objects list<br/>- Annotated image
 ```
 
-### 2.2 Real-time Detection Stream (EventSource)
+### 2.3 Real-time Detection via WebSocket
 
 ```mermaid
 sequenceDiagram
-    title Real-time Detection Stream
+    title Real-time Detection via WebSocket
     participant Frontend
     participant Backend
     participant "AI Service"
     participant "EventSource"
 
-    Frontend->>Backend: GET /stream/{camera_id}/events
-    Backend-->>Frontend: 200 OK (SSE connection)
+    Frontend->>Backend: WebSocket /api/stream/{camera_id}/ws
+    Backend-->>Frontend: 101 Switching Protocols
 
-    loop Continuous detection (~30fps)
+    loop Continuous (~30fps)
+        Backend->>Backend: Grab frame
+    end
+    loop Every 0.5s (2Hz)
         Backend->>"AI Service": Call AI inference
         "AI Service"-->>Backend: Detection results
-        Backend->>Backend: Update detection_results
-        Backend-->>Frontend: data: {"camera_id", "detections"}
-        Frontend->>Frontend: Update UI display
+        Backend->>Backend: Store detections
     end
+    Backend-->>Frontend: WebSocket: {type: "frame", frame: base64, detections: [...]}
+    Frontend->>Frontend: Update video + detection overlay
 ```
 
-**Note:** Detection results are overlaid on video stream and pushed in real-time via SSE.
+**Key Points:**
+- Detection results are embedded in the same WebSocket message as video frames
+- No need for separate SSE connection or frontend-initiated AI calls
+- Backend throttles AI calls to 2Hz to balance performance and resource usage
 
-### 2.3 Detection Result Update Mechanism
+### 2.4 Legacy SSE Endpoint (Backward Compatibility)
 
 ```mermaid
 sequenceDiagram
-    title Detection Result Update
-    participant "Video Frame" as Video
-    participant "AI Service" as AI
-    participant "Detection Store" as Store
-    participant "Frontend UI" as UI
+    title Legacy Detection SSE (EventSource)
+    participant Frontend
+    participant Backend
+    participant "Detection Store"
 
-    Video->>AI: Send frame
-    AI->>AI: YOLO inference
-    AI->>Store: Update detection results (detections + timestamp)
-    Store-->>UI: Push event (SSE)
-    UI->>UI: Refresh detection display
+    Frontend->>Backend: EventSource GET /api/stream/{camera_id}/events
+    Backend-->>Frontend: 200 OK (SSE connection)
 
-    alt New detection
-        Store->>Store: detection_results[camera_id] = {detections, timestamp}
-    else No detection
-        Store->>Store: Delete camera_id record
+    loop Continuous
+        Backend->>"Detection Store": Check for new results
+        "Detection Store"-->>Backend: Latest detection data
+        Backend-->>Frontend: data: {camera_id, detections}
+        Frontend->>Frontend: Update detection display
     end
 ```
+
+**Note:** The SSE endpoint still exists for backward compatibility but WebSocket is recommended.
 
 ---
 
@@ -289,7 +339,7 @@ sequenceDiagram
     participant Frontend
     participant Backend
     participant "AI Service"
-    participant Database
+    participant "Camera Config"
 
     Docker->>Frontend: Start container
     Docker->>Backend: Start container
@@ -298,7 +348,7 @@ sequenceDiagram
     "AI Service"->>"AI Service": Load YOLO models (yolov8n.pt, yolov8n-cls.pt)
     "AI Service"-->>Backend: AI Service ready
 
-    Backend->>Database: Load camera config (cameras.json)
+    Backend->>"Camera Config": Load camera config (cameras.json)
     Backend->>Backend: Initialize camera service
 
     Frontend->>Backend: Load camera list GET /api/cameras
@@ -306,15 +356,86 @@ sequenceDiagram
     Frontend->>Frontend: Render Dashboard
 ```
 
+### 6.2 WebSocket Connection Lifecycle
+
+```mermaid
+sequenceDiagram
+    title WebSocket Stream Lifecycle
+    participant Frontend
+    participant Backend
+    participant "Frame Grabber"
+    participant "AI Caller"
+
+    Frontend->>Backend: Connect WebSocket /api/stream/{id}/ws
+    Backend->>Backend: ensure_tasks_running()
+    Backend->>"Frame Grabber": Start/Resume task
+    Backend->>"AI Caller": Start/Resume task
+    Backend-->>Frontend: WebSocket connected
+
+    loop Continuous (30fps)
+        "Frame Grabber"->>"Frame Grabber": Grab frame
+        "Frame Grabber"->>Backend: Update latest_frame
+    end
+    
+    loop Every 0.5s (2Hz)
+        "AI Caller"->>"AI Caller": Check enabled algorithms
+        "AI Caller"->>"AI Caller": Call AI service
+        "AI Caller"->>Backend: Update latest_detections
+    end
+    
+    Backend-->>Frontend: WebSocket: {frame, detections}
+    
+    Note over Frontend,Backend: Tasks persist when all clients disconnect<br/>(resume immediately when new client connects)
+
+    Frontend->>Backend: Close WebSocket
+    Backend->>Backend: Remove connection from pool
+    Note over Backend: Tasks continue running (not stopped)
+```
+
+### 6.3 Frontend WebSocket Integration
+
+```mermaid
+sequenceDiagram
+    title Frontend Stream Manager
+    participant "streamManager.js"
+    participant Frontend
+    participant Backend
+
+    Note over "streamManager.js": Module-level singleton<br/>Survives component unmounts
+
+    Frontend->>"streamManager.js": subscribe(cameraId, callbacks)
+    "streamManager.js"->>"streamManager.js": Get or create camera state
+    "streamManager.js"->>"streamManager.js": Add callback to subscribers
+    
+    alt WebSocket not connected
+        "streamManager.js"->>Backend: Connect WebSocket
+        Backend-->>"streamManager.js": Connection established
+    end
+    
+    loop On frame received
+        Backend-->>"streamManager.js": {type: "frame", frame: base64, detections: [...]}
+        "streamManager.js"->>"streamManager.js": Parse message
+        "streamManager.js"->>Frontend: callbacks.onFrame(base64, data)
+        alt Has detections
+            "streamManager.js"->>Frontend: callbacks.onDetection(detections)
+        end
+    end
+
+    Frontend->>"streamManager.js": Unsubscribe
+    "streamManager.js"->>"streamManager.js": Remove from subscribers
+    Note over "streamManager.js": Disconnect after 5s if no subscribers remain
+```
+
 ---
 
 ## 7. Key Interface Sequence Summary
 
-| Endpoint | Method | Trigger | Sequence Diagram |
-|----------|--------|---------|------------------|
-| `/stream/{id}` | GET | View camera video | [Video Stream Processing](#1-video-stream-processing) |
-| `/stream/{id}/events` | GET | Real-time detection | [Real-time Detection Stream](#22-real-time-detection-stream-eventsource) |
-| `/api/process` | POST | Single frame analysis | [AI Detection Flow](#2-ai-detection-flow) |
-| `/api/cameras` | POST | Add camera | [Camera Management](#3-camera-management) |
-| `/api/cameras/{id}` | PATCH | Update config | [ROI Configuration](#5-roi-configuration) |
+| Endpoint | Method | Type | Description | Sequence Diagram |
+|----------|--------|------|-------------|------------------|
+| `/api/stream/{id}/ws` | WebSocket | **Primary** | Live video + AI detection | [WebSocket Stream](#11-real-time-video-stream-via-websocket) |
+| `/api/stream/{id}` | GET | HTTP (Legacy) | MJPEG stream | [Legacy MJPEG](#13-legacy-mjpeg-endpoint-backward-compatibility) |
+| `/api/stream/{id}/events` | GET | SSE (Legacy) | Real-time detection events | [Legacy SSE](#24-legacy-sse-endpoint-backward-compatibility) |
+| `/api/process` | POST | REST | Single frame AI analysis | [On-Demand AI](#22-single-frame-ai-analysis-on-demand) |
+| `/api/cameras` | POST | REST | Add camera | [Camera Management](#3-camera-management) |
+| `/api/cameras/{id}` | PATCH | REST | Update config | [ROI Configuration](#5-roi-configuration) |
 

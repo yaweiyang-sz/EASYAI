@@ -34,7 +34,7 @@ The system adopts a microservices architecture with three independent services:
 │                      (React + Vite, Port 3000)                   │
 └─────────────────────────────────────────────────────────────────┘
                                   │
-                    HTTP REST / Server-Sent Events
+                    WebSocket + HTTP REST + SSE
                                   │
         ┌─────────────────────────┴─────────────────────────┐
         │                                                   │
@@ -51,12 +51,21 @@ The system adopts a microservices architecture with three independent services:
                        └─────────────────┘
 ```
 
+**Communication Patterns:**
+
+| Service | Protocol | Purpose |
+|---------|----------|---------|
+| Frontend → Backend | WebSocket | Live video stream + real-time detection |
+| Frontend → Backend | HTTP REST | Camera CRUD operations |
+| Backend → AI Service | HTTP REST (httpx) | AI inference requests |
+| Frontend → AI Service | HTTP REST | On-demand single frame analysis |
+
 **Service Responsibilities:**
 
 | Service | Responsibility | Tech Stack |
 |---------|---------------|------------|
-| Frontend | User interface, video display, interaction | React, TailwindCSS, Socket.io |
-| Backend | Camera management, video streaming, event management | FastAPI, OpenCV, FFmpeg |
+| Frontend | User interface, WebSocket stream manager, video rendering | React, TailwindCSS, Native WebSocket |
+| Backend | Camera management, video streaming, WebSocket relay, AI orchestration | FastAPI, OpenCV, FFmpeg, httpx |
 | AI Service | AI model inference, image annotation | FastAPI, Ultralytics YOLOv8 |
 
 ### 2.2 Technology Stack
@@ -65,6 +74,7 @@ The system adopts a microservices architecture with three independent services:
 - **Framework**: FastAPI (Python 3.9+)
 - **Video Processing**: OpenCV, FFmpeg
 - **Async Communication**: httpx (async HTTP client)
+- **WebSocket**: FastAPI native WebSocket support
 
 **AI Service:**
 - **Framework**: FastAPI + Ultralytics YOLOv8
@@ -75,22 +85,38 @@ The system adopts a microservices architecture with three independent services:
 - **Framework**: React 18 + Vite
 - **Styling**: TailwindCSS
 - **Routing**: React Router v6
-- **Real-time Communication**: Socket.io-client, EventSource
+- **Real-time Communication**: Native WebSocket API
 
 ### 2.3 Data Flow Architecture
 
 ```
 ┌─────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐
 │  RTSP   │────▶│   Backend   │────▶│  AI Service │     │  Frontend │
-│ Camera  │     │   (Stream)  │     │  (YOLOv8)   │     │           │
+│ Camera  │     │   (FastAPI) │     │  (YOLOv8)   │     │           │
 └─────────┘     └─────────────┘     └─────────────┘     └───────────┘
                       │                    │                    │
-                      │   JPEG Frame       │   Annotated Frame │
-                      │◀───────────────────│◀───────────────────│
                       │                    │                    │
-                      │   Detection Events (SSE)              │
-                      │◀───────────────────────────────────────│
+                      │   Frame Grabber    │   AI Inference      │
+                      │   (30fps loop)     │   (2Hz loop)        │
+                      │                    │                    │
+                      │   WebSocket Frame  │   {detections}      │
+                      │◀──────────────────│◀───────────────────│
+                      │                    │                    │
+                      │   {frame + detections}                   │
+                      │◀─────────────────────────────────────────│
+                      │                    │                    │
+                      │   WebSocket JSON: {type: "frame",        │
+                      │   frame: base64, detections: [...]}     │
 ```
+
+**Key Components:**
+
+| Component | Description | Rate |
+|-----------|-------------|------|
+| `frame_grabber_task` | Captures frames from camera, resizes, encodes to JPEG | 30fps (~33ms) |
+| `algo_caller_task` | Calls AI service with current frame, stores results | 2Hz (500ms) |
+| `CameraStreamState` | Shared state per camera: latest frame, detections, WebSocket clients | - |
+| `WebSocket` | Sends bundled frame + detections to all connected clients | 30fps |
 
 ---
 
