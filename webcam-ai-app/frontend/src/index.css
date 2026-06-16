@@ -16,6 +16,7 @@ body {
 
 .app {
   min-height: 100vh;
+  height: 100vh;
 }
 
 .navbar {
@@ -350,8 +351,12 @@ body {
 .camera-view-container {
   padding: 1rem;
   max-width: 100%;
-  height: calc(100vh - 80px);
+  height: 100vh;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #0f172a;
 }
 
 .camera-view-container.fullscreen {
@@ -403,6 +408,7 @@ body {
   border-radius: 12px;
   overflow: hidden;
   position: relative;
+  margin-bottom: 0;
 }
 
 .video-container.fullscreen-video {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { cameraApi, aiApi } from '../services/api'
+import { subscribe, isConnected } from '../services/streamManager'
 
 // Module-level cache: persists across SPA navigations (not across F5)
 const frameCache = { data: null, cameraId: null }
@@ -27,128 +28,97 @@ function CameraView() {
   const containerRef = useRef(null)
   const imgRef = useRef(null)
   const placeholderRef = useRef(null)
-  const wsRef = useRef(null)
-  const reconnectTimerRef = useRef(null)
+  const unsubscribeRef = useRef(null)
   const mountedRef = useRef(true)
   const streamStateRef = useRef({ detections: [], lastDetectionUpdate: 0 })
   const frameCacheUsedRef = useRef(false)
 
-  // ── Decode base64 to blob URL (pure function, no deps) ──
+  // ── Decode base64 → blob URL ──
   const base64ToObjectUrl = useCallback((base64Data) => {
-    if (base64Data._cachedUrl) return base64Data._cachedUrl  // reuse
     const binaryStr = atob(base64Data)
     const bytes = new Uint8Array(binaryStr.length)
     for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
-    base64Data._cachedUrl = url  // memoize on the string object (works for same reference)
-    return url
+    return URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
   }, [])
 
-  // ── Direct DOM frame render ──
+  const hidePlaceholder = useCallback(() => {
+    const el = placeholderRef.current
+    if (el) { el.style.display = 'none'; el.style.visibility = 'hidden' }
+  }, [])
+
   const renderFrame = useCallback((base64Data, isCache) => {
     if (!mountedRef.current) return
     const img = imgRef.current
-    if (!img) return
-
-    // Hide placeholder
-    const placeholder = placeholderRef.current
-    if (placeholder) placeholder.style.display = 'none'
-
-    // Revoke previous URL
-    if (img._objectUrl) URL.revokeObjectURL(img._objectUrl)
-
-    img._objectUrl = base64ToObjectUrl(base64Data)
-    img.src = img._objectUrl
-
+    if (!img) {
+      frameCache.data = base64Data
+      frameCache.cameraId = id
+      return
+    }
+    hidePlaceholder()
+    const newUrl = base64ToObjectUrl(base64Data)
+    const prevUrl = img._objectUrl
+    img._objectUrl = newUrl
+    img.src = newUrl
+    if (prevUrl) {
+      img.onload = () => { URL.revokeObjectURL(prevUrl); img.onload = null }
+    }
     if (!isCache) {
       frameCache.data = base64Data
       frameCache.cameraId = id
     }
-  }, [id, base64ToObjectUrl])
+  }, [id, base64ToObjectUrl, hidePlaceholder])
 
-  // ── Hide placeholder helper (not dependent on ref order) ──
-  const hidePlaceholder = useCallback(() => {
-    // Query by class since ref ordering may not be guaranteed
-    const placeholder = placeholderRef.current || document.getElementById(`placeholder-${id}`)
-    if (placeholder) placeholder.style.display = 'none'
-    // Also try ref directly (will work if set before img in JSX)
-    if (placeholderRef.current) placeholderRef.current.style.display = 'none'
-  }, [id])
+  // Stable ref so streamManager's onFrame callback never captures a stale closure
+  const renderFrameRef = useRef(renderFrame)
+  useEffect(() => { renderFrameRef.current = renderFrame }, [renderFrame])
 
-  // ── img ref callback: fires when React creates the DOM element ──
   const imgRefCallback = useCallback((el) => {
     imgRef.current = el
     if (!el) return
-
-    // Apply cached frame instantly if available and hasn't been used yet
     if (!frameCacheUsedRef.current && frameCache.cameraId === id && frameCache.data) {
       frameCacheUsedRef.current = true
-      el._objectUrl = base64ToObjectUrl(frameCache.data)
-      el.src = el._objectUrl
-      // Use requestAnimationFrame to ensure placeholder ref is set
+      const url = base64ToObjectUrl(frameCache.data)
+      el._objectUrl = url
+      el.src = url
       requestAnimationFrame(() => hidePlaceholder())
     }
   }, [id, base64ToObjectUrl, hidePlaceholder])
 
-  // ── WebSocket ──
+  // ── WebSocket via shared streamManager ──
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null
-    }
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null
-    }
-    if (!mountedRef.current) return
+    if (unsubscribeRef.current) return
 
-    const ws = new WebSocket(cameraApi.getWebSocketUrl(id))
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      if (!mountedRef.current) { ws.close(); return }
-      setWsConnected(true)
-      setError(null)
-    }
-
-    ws.onmessage = (event) => {
-      if (!mountedRef.current) return
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'frame' && data.frame) {
-          renderFrame(data.frame)
-          if (data.detections?.length > 0 && Date.now() - streamStateRef.current.lastDetectionUpdate > 250) {
-            streamStateRef.current.lastDetectionUpdate = Date.now()
-            setStreamingDetections(data.detections)
-          }
-        } else if (data.type === 'ping') {
-          ws.send(JSON.stringify({ type: 'pong' }))
+    const unsub = subscribe(id, {
+      onOpen: () => { if (mountedRef.current) setWsConnected(true) },
+      onFrame: (base64Data, msgData) => {
+        if (!mountedRef.current) return
+        // Always call the latest renderFrame via ref — never a stale closure
+        renderFrameRef.current(base64Data)
+        if (msgData.detections?.length > 0 && Date.now() - streamStateRef.current.lastDetectionUpdate > 250) {
+          streamStateRef.current.lastDetectionUpdate = Date.now()
+          setStreamingDetections(msgData.detections)
         }
-      } catch (err) {}
-    }
+      },
+      onClose: () => { if (mountedRef.current) setWsConnected(false) },
+    })
 
-    ws.onclose = () => {
-      wsRef.current = null
-      setWsConnected(false)
-      if (!mountedRef.current) return
-      reconnectTimerRef.current = setTimeout(connectWebSocket, 2000)
-    }
-    ws.onerror = () => {}
-  }, [id, renderFrame])
+    unsubscribeRef.current = unsub
+    setWsConnected(isConnected(id))
+  }, [id])  // no longer depends on renderFrame
 
   const disconnectWebSocket = useCallback(() => {
-    if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null }
-    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null }
+    unsubscribeRef.current?.()
+    unsubscribeRef.current = null
     setStreamingDetections([])
     setWsConnected(false)
   }, [])
 
-  // ── Lifecycle ──
   useEffect(() => {
     mountedRef.current = true
     frameCacheUsedRef.current = false
     loadCamera()
     loadAlgorithms()
     connectWebSocket()
-
     return () => {
       mountedRef.current = false
       disconnectWebSocket()
@@ -241,12 +211,12 @@ function CameraView() {
               setRoiEnd({ x: Math.round((e.clientX - r.left) * imageSize.width / r.width), y: Math.round((e.clientY - r.top) * imageSize.height / r.height) })
             }}
           >
-            <img ref={imgRefCallback} alt="Live Stream" className="video-stream"
+            <img ref={imgRefCallback} alt="" className="video-stream"
               onLoad={(e) => { if (e.target.naturalWidth) setImageSize({ width: e.target.naturalWidth, height: e.target.naturalHeight }) }}
-              style={{ cursor: roiMode ? 'crosshair' : 'default' }}
+              style={{ cursor: roiMode ? 'crosshair' : 'default', width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
             />
-            <div ref={placeholderRef} id={`placeholder-${id}`} className="video-stream-placeholder"
-              style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e293b', zIndex: 1 }}>
+            <div ref={placeholderRef} id={`placeholder-${id}`}
+              style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#1e293b', zIndex: 2, color: '#94a3b8', fontSize: '0.875rem' }}>
               Connecting to stream...
             </div>
 
