@@ -14,7 +14,7 @@ import os
 import numpy as np
 import threading
 import time
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Optional, Callable
 from models import Camera, CameraCreate, CameraUpdate, AlgorithmConfig
 
 

@@ -32,6 +32,7 @@ class CameraStreamState:
         self.frame_task: Optional[asyncio.Task] = None
         self.algo_task: Optional[asyncio.Task] = None
         self.connections: Set[WebSocket] = set()
+        self.has_clients = asyncio.Event()  # set when connections > 0
 
 stream_states: Dict[str, CameraStreamState] = {}
 detection_results: Dict[str, dict] = {}
@@ -81,8 +82,9 @@ async def frame_grabber_task(camera_id: str):
 
     while True:
         if not state.connections:
-            await asyncio.sleep(0.5)
-            continue
+            state.has_clients.clear()
+            await state.has_clients.wait()  # wake instantly when first client connects
+            state.has_clients.clear()
 
         try:
             frame = await camera_service.get_frame(camera_id, timeout=1.0)
@@ -237,6 +239,7 @@ async def websocket_stream(websocket: WebSocket, camera_id: str):
 
     state = stream_states[camera_id]
     state.connections.add(websocket)
+    state.has_clients.set()  # wake the frame grabber if it's sleeping
 
     try:
         while True:

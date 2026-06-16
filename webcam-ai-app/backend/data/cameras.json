@@ -11,9 +11,14 @@
           "id": "algo_1781352277453",
           "name": "Person Detection",
           "algorithm_type": "object_detection",
-          "enabled": false,
+          "enabled": true,
           "confidence": 0.2,
-          "roi": null,
+          "roi": {
+            "x1": 25,
+            "y1": 169,
+            "x2": 192,
+            "y2": 303
+          },
           "classes": []
         }
       ]
