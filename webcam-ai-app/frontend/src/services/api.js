@@ -12,25 +12,25 @@ async function fetchWithError(url, options = {}) {
 }
 
 export const cameraApi = {
-  list: () => fetchWithError(`${API_BASE}/cameras/`),
+  list: () => fetchWithError(`${API_BASE}/cameras`),
 
-  get: (id) => fetchWithError(`${API_BASE}/cameras/${id}/`),
+  get: (id) => fetchWithError(`${API_BASE}/cameras/${id}`),
 
-  listDevices: () => fetchWithError(`${API_BASE}/cameras/devices/`),
+  listDevices: () => fetchWithError(`${API_BASE}/cameras/devices`),
 
-  create: (data) => fetchWithError(`${API_BASE}/cameras/`, {
+  create: (data) => fetchWithError(`${API_BASE}/cameras`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   }),
 
-  update: (id, data) => fetchWithError(`${API_BASE}/cameras/${id}/`, {
+  update: (id, data) => fetchWithError(`${API_BASE}/cameras/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)
   }),
 
-  delete: (id) => fetchWithError(`${API_BASE}/cameras/${id}/`, {
+  delete: (id) => fetchWithError(`${API_BASE}/cameras/${id}`, {
     method: 'DELETE'
   }),
 
@@ -41,6 +41,11 @@ export const cameraApi = {
     if (aiUrl) params.push(`ai_url=${encodeURIComponent(aiUrl)}`);
     if (params.length) url += '?' + params.join('&');
     return url;
+  },
+
+  getWebSocketUrl: (id) => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}${API_BASE}/stream/${id}/ws`;
   },
 
   getSnapshotUrl: (id) => `${API_BASE}/stream/${id}/snapshot`

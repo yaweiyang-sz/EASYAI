@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AlertTriangle, Shield, ShieldOff, Video, Users, PlaneTakeoff, Plane, ShieldAlert, CheckCircle, Clock, Wifi, WifiOff, Maximize2 } from 'lucide-react';
-import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import { cameraApi } from '../services/api';
 
@@ -9,8 +8,6 @@ const INITIAL_ALERTS = [
   { id: 2, time: '11:45', type: 'suspicious', message: 'Passenger 37A moved to First Class.', resolved: true },
   { id: 3, time: '11:31', type: 'wellbeing', message: 'Lavatory A elapsed time over 20 minutes.', resolved: false },
 ];
-
-const API_BASE = '/api';
 
 const generatePassengerData = () => {
   const data = {};
@@ -49,36 +46,144 @@ export default function CabinCrewDashboard() {
   const [anonymize, setAnonymize] = useState(true);
   const [alerts, setAlerts] = useState(INITIAL_ALERTS);
   const [currentTime, setCurrentTime] = useState(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-  const [isConnected, setIsConnected] = useState(false);
   const [passengers, setPassengers] = useState(PASSENGER_DATA);
   const [cameras, setCameras] = useState([]);
   const [loadingCameras, setLoadingCameras] = useState(false);
   const [detectionAlerts, setDetectionAlerts] = useState({});
-  const eventSourceRef = useRef(null);
 
+  // Direct DOM refs — NO React state for frame data
+  const wsRefs = useRef({});        // cameraId -> WebSocket
+  const imgRefs = useRef({});       // cameraId -> HTMLImageElement
+  const camerasRef = useRef([]);
+  const mountedRef = useRef(true);
+  const lastDetectionUpdateRef = useRef(0);
+
+  // Keep camerasRef in sync
   useEffect(() => {
+    camerasRef.current = cameras;
+  }, [cameras]);
+
+  // ── Direct DOM frame render (no React state) ──
+  const renderCameraFrame = useCallback((cameraId, base64Data) => {
+    const img = imgRefs.current[cameraId];
+    if (!img || !mountedRef.current) return;
+
+    // Hide the "Connecting..." placeholder on first frame
+    const placeholder = document.getElementById(`cam-placeholder-${cameraId}`);
+    if (placeholder) {
+      placeholder.style.opacity = '0';
+      // Remove after transition
+      setTimeout(() => {
+        if (placeholder.parentNode) placeholder.style.display = 'none';
+      }, 300);
+    }
+
+    // Revoke previous blob URL to prevent memory leak
+    if (img._objectUrl) {
+      URL.revokeObjectURL(img._objectUrl);
+    }
+
+    const binaryStr = atob(base64Data);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: 'image/jpeg' });
+    img._objectUrl = URL.createObjectURL(blob);
+    img.src = img._objectUrl;
+  }, []);
+
+  // ── WebSocket per camera ──
+  const connectCameraWebSocket = useCallback((cameraId) => {
+    if (wsRefs.current[cameraId]?.readyState === WebSocket.OPEN ||
+        wsRefs.current[cameraId]?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    const wsUrl = cameraApi.getWebSocketUrl(cameraId);
+    const ws = new WebSocket(wsUrl);
+    wsRefs.current[cameraId] = ws;
+
+    ws.onopen = () => {};
+
+    ws.onmessage = (event) => {
+      if (!mountedRef.current) return;
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'frame' && data.frame) {
+          // Direct DOM update — NO setState
+          renderCameraFrame(cameraId, data.frame);
+
+          // Throttle detection alerts to 4 Hz
+          if (data.detections && data.detections.length > 0) {
+            const now = Date.now();
+            if (now - lastDetectionUpdateRef.current > 250) {
+              lastDetectionUpdateRef.current = now;
+              const currentCameras = camerasRef.current;
+              const camera = currentCameras.find(c => c.id === cameraId);
+              const cameraName = camera?.name || 'Unknown Camera';
+
+              setDetectionAlerts(prev => {
+                const updated = { ...prev };
+                data.detections.forEach(det => {
+                  const key = `${cameraId}-${det.label}`;
+                  const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                  if (updated[key]) {
+                    updated[key] = { ...updated[key], time: nowTime, confidence: det.confidence, count: updated[key].count + 1 };
+                  } else {
+                    updated[key] = { id: key, cameraId, cameraName, label: det.label, confidence: det.confidence, time: nowTime, count: 1, resolved: false };
+                  }
+                });
+                return updated;
+              });
+            }
+          }
+        } else if (data.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+      } catch (err) {
+        // ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      wsRefs.current[cameraId] = null;
+      if (!mountedRef.current) return;
+      setTimeout(() => {
+        if (!wsRefs.current[cameraId] && mountedRef.current) {
+          connectCameraWebSocket(cameraId);
+        }
+      }, 3000);
+    };
+
+    ws.onerror = () => {};
+  }, [renderCameraFrame]);
+
+  // ── Cleanup ──
+  const disconnectAllWebSockets = useCallback(() => {
+    Object.keys(wsRefs.current).forEach(cameraId => {
+      const ws = wsRefs.current[cameraId];
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+        wsRefs.current[cameraId] = null;
+      }
+    });
+    // Clean up blob URLs
+    Object.values(imgRefs.current).forEach(img => {
+      if (img && img._objectUrl) {
+        URL.revokeObjectURL(img._objectUrl);
+      }
+    });
+  }, []);
+
+  // ── Timers ──
+  useEffect(() => {
+    mountedRef.current = true;
     const timer = setInterval(() => {
       setCurrentTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     }, 60000);
-
-    const socket = io('http://localhost:5000', {
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
-    });
-
-    socket.on('connect', () => {
-      console.log('Connected to Amber Backend');
-      setIsConnected(true);
-    });
-
-    socket.on('disconnect', () => {
-      console.warn('Disconnected from Amber Backend');
-      setIsConnected(false);
-    });
-
-    socket.on('new_alert', (newAlert) => {
-      setAlerts(prevAlerts => [newAlert, ...prevAlerts]);
-    });
 
     const passengerTimer = setInterval(() => {
       setPassengers(prev => {
@@ -91,110 +196,43 @@ export default function CabinCrewDashboard() {
     }, 5000);
 
     return () => {
+      mountedRef.current = false;
       clearInterval(timer);
       clearInterval(passengerTimer);
-      socket.disconnect();
     };
   }, []);
 
+  // ── Load cameras + connect WebSockets ──
   useEffect(() => {
     const loadCameras = async () => {
       try {
         setLoadingCameras(true);
         const data = await cameraApi.list();
+        if (!mountedRef.current) return;
         setCameras(data);
-        
+
         data.forEach(camera => {
-          if (camera.algorithms && camera.algorithms.some(a => a.enabled)) {
-            startDetectionStream(camera.id);
+          if (camera.enabled) {
+            connectCameraWebSocket(camera.id);
           }
         });
       } catch (err) {
-        console.error('Failed to load cameras:', err);
+        // ignore
       } finally {
-        setLoadingCameras(false);
+        if (mountedRef.current) setLoadingCameras(false);
       }
     };
     loadCameras();
 
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      disconnectAllWebSockets();
     };
   }, []);
-
-  const startDetectionStream = (cameraId) => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-
-    try {
-      const url = `${API_BASE}/stream/${cameraId}/events`;
-      eventSourceRef.current = new EventSource(url);
-      eventSourceRef.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          handleDetectionEvent(data);
-        } catch (err) {
-          console.error('Failed to parse detection event:', err);
-        }
-      };
-      eventSourceRef.current.onerror = (error) => {
-        console.error('EventSource error:', error);
-        eventSourceRef.current?.close();
-        eventSourceRef.current = null;
-      };
-    } catch (err) {
-      console.error('Failed to start detection stream:', err);
-    }
-  };
-
-  const handleDetectionEvent = (data) => {
-    const { camera_id, detections } = data;
-    const camera = cameras.find(c => c.id === camera_id);
-    const cameraName = camera?.name || 'Unknown Camera';
-
-    if (detections && detections.length > 0) {
-      setDetectionAlerts(prev => {
-        const updated = { ...prev };
-        
-        detections.forEach(det => {
-          const key = `${camera_id}-${det.label}`;
-          const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          
-          if (updated[key]) {
-            updated[key] = {
-              ...updated[key],
-              time: now,
-              confidence: det.confidence,
-              count: updated[key].count + 1
-            };
-          } else {
-            updated[key] = {
-              id: key,
-              cameraId: camera_id,
-              cameraName,
-              label: det.label,
-              confidence: det.confidence,
-              time: now,
-              count: 1,
-              resolved: false
-            };
-          }
-        });
-        
-        return updated;
-      });
-    }
-  };
 
   const resolveDetectionAlert = (key) => {
     setDetectionAlerts(prev => {
       const updated = { ...prev };
-      if (updated[key]) {
-        updated[key].resolved = true;
-      }
+      if (updated[key]) updated[key].resolved = true;
       return updated;
     });
   };
@@ -205,9 +243,7 @@ export default function CabinCrewDashboard() {
 
   const unreadAlertsCount = alerts.filter(a => !a.resolved).length;
 
-  const isSeatOccupied = (seatId) => {
-    return passengers[seatId] || false;
-  };
+  const isSeatOccupied = (seatId) => passengers[seatId] || false;
 
   return (
     <div className="h-screen bg-slate-900 text-slate-100 font-sans flex flex-col overflow-hidden">
@@ -223,37 +259,26 @@ export default function CabinCrewDashboard() {
         </div>
 
         <div className="flex bg-slate-900 rounded-xl p-1 border border-slate-700">
-          <button
-            onClick={() => setFlightMode('boarding')}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${flightMode === 'boarding' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}
-          >
-            <Users className="w-4 h-4" />
-            <span>Boarding</span>
-          </button>
-          <button
-            onClick={() => setFlightMode('taxi')}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${flightMode === 'taxi' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}
-          >
-            <PlaneTakeoff className="w-4 h-4" />
-            <span>Taxi</span>
-          </button>
-          <button
-            onClick={() => setFlightMode('cruise')}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${flightMode === 'cruise' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}
-          >
-            <Plane className="w-4 h-4" />
-            <span>Cruise</span>
-          </button>
+          {['boarding', 'taxi', 'cruise'].map(mode => {
+            const icons = { boarding: Users, taxi: PlaneTakeoff, cruise: Plane };
+            const Icon = icons[mode];
+            return (
+              <button key={mode}
+                onClick={() => setFlightMode(mode)}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center space-x-2 ${flightMode === mode ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                <Icon className="w-4 h-4" />
+                <span>{mode.charAt(0).toUpperCase() + mode.slice(1)}</span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="flex items-center space-x-6 pr-2">
-          <div className={`flex items-center px-3 py-1.5 rounded-full border ${isConnected ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
-            {isConnected ? <Wifi className="w-4 h-4 mr-2" /> : <WifiOff className="w-4 h-4 mr-2" />}
-            <span className="text-xs font-bold tracking-wide uppercase">
-              {isConnected ? 'System Live' : 'Offline'}
-            </span>
+          <div className="flex items-center px-3 py-1.5 rounded-full border bg-emerald-500/10 border-emerald-500/30 text-emerald-400">
+            <Wifi className="w-4 h-4 mr-2" />
+            <span className="text-xs font-bold tracking-wide uppercase">System Live</span>
           </div>
-
           <div className="text-right">
             <div className="text-xl font-light">{currentTime}</div>
             <div className="text-[10px] text-slate-400 uppercase tracking-widest">UTC +8</div>
@@ -261,10 +286,8 @@ export default function CabinCrewDashboard() {
         </div>
       </header>
 
-      {/* Main layout: Camera Feeds (left) | Cabin Overview (center) | Events (right) - Ratio 1:4:1 */}
       <main className="flex-1 p-2 flex gap-2 min-h-0 overflow-hidden w-full">
-
-        {/* Camera Feeds - Left Panel (vertical listing) - 1 part */}
+        {/* Camera Feeds - Left Panel */}
         <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 p-3 flex flex-col overflow-hidden" style={{flex: 1}}>
           <div className="flex items-center justify-between mb-3 shrink-0">
             <h2 className="font-semibold flex items-center text-sm">
@@ -281,9 +304,7 @@ export default function CabinCrewDashboard() {
 
           <div className="flex-1 flex flex-col gap-2 overflow-y-auto">
             {loadingCameras ? (
-              <div className="flex items-center justify-center py-8">
-                <div className="text-slate-400 text-sm">Loading cameras...</div>
-              </div>
+              <div className="flex items-center justify-center py-8"><div className="text-slate-400 text-sm">Loading cameras...</div></div>
             ) : cameras.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <Video className="w-12 h-12 text-slate-600 mb-3" />
@@ -292,24 +313,22 @@ export default function CabinCrewDashboard() {
               </div>
             ) : (
               cameras.map((camera, index) => (
-                <div 
-                  key={camera.id} 
+                <div key={camera.id}
                   className="bg-black rounded-lg border border-slate-700 relative overflow-hidden cursor-pointer hover:border-blue-500 transition-colors"
                   onClick={() => navigate(`/camera/${camera.id}`)}
                 >
-                  {/* 16:9 aspect ratio container */}
-                  <div className="aspect-video w-full bg-slate-900">
+                  <div className="aspect-video w-full bg-slate-900 relative">
                     {camera.enabled ? (
-                      <img 
-                        src={cameraApi.getStreamUrl(camera.id)} 
-                        alt={camera.name} 
-                        className="w-full h-full object-cover"
-                        onError={(e) => {
-                          e.target.onerror = null;
-                          e.target.src = `https://images.unsplash.com/photo-1540339832862-474589b0a11b?auto=format&fit=crop&w=800&q=80`;
-                          e.target.className = 'w-full h-full object-cover opacity-40';
-                        }}
-                      />
+                      <>
+                        <img
+                          ref={el => { imgRefs.current[camera.id] = el; }}
+                          alt={camera.name}
+                          className="w-full h-full object-cover"
+                        />
+                        <div className="absolute inset-0 flex items-center justify-center bg-slate-800 transition-opacity duration-300" id={`cam-placeholder-${camera.id}`}>
+                          <div className="text-slate-500 text-xs">Connecting...</div>
+                        </div>
+                      </>
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-slate-800">
                         <div className="text-slate-500 text-xs">Camera Offline</div>
@@ -319,18 +338,14 @@ export default function CabinCrewDashboard() {
                   <div className="absolute top-1.5 left-1.5 bg-black/60 px-1.5 py-0.5 rounded text-[9px] font-mono shadow">
                     CAM {index + 1}: {camera.name}
                   </div>
-                  <div className={`absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${camera.enabled ? 'bg-emerald-500/80 text-black' : 'bg-slate-600/80 text-white'}`}>
+                  <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/80 text-black">
                     {camera.enabled ? 'LIVE' : 'OFFLINE'}
                   </div>
                   <div className="absolute top-1.5 right-1.5 bg-black/60 px-1.5 py-0.5 rounded text-[8px] text-slate-300">
                     {camera.type.toUpperCase()}
                   </div>
-                  <button 
-                    className="absolute bottom-1.5 left-1.5 bg-blue-600/80 hover:bg-blue-500 p-1 rounded transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/camera/${camera.id}`);
-                    }}
+                  <button className="absolute bottom-1.5 left-1.5 bg-blue-600/80 hover:bg-blue-500 p-1 rounded transition-colors"
+                    onClick={(e) => { e.stopPropagation(); navigate(`/camera/${camera.id}`); }}
                     title="Open camera view"
                   >
                     <Maximize2 className="w-3 h-3 text-white" />
@@ -341,7 +356,7 @@ export default function CabinCrewDashboard() {
           </div>
         </div>
 
-        {/* Cabin Overview - Center Panel - 4 parts */}
+        {/* Cabin Overview - Center Panel */}
         <div className="flex-1 flex flex-col gap-2 min-h-0" style={{flex: 4}}>
           <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 p-3 flex flex-col min-h-0 overflow-hidden">
             <div className="flex justify-between items-center mb-3 shrink-0">
@@ -359,7 +374,6 @@ export default function CabinCrewDashboard() {
             <div className="flex-1 bg-slate-900 rounded-lg border border-slate-800 overflow-y-auto overflow-x-hidden">
               <div className="min-h-full">
                 <div className="flex flex-col">
-                  {/* Cockpit */}
                   <div className="bg-red-500/20 border-b-2 border-red-500/50 flex items-center justify-center py-3">
                     <div className="flex items-center space-x-2">
                       <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
@@ -367,87 +381,39 @@ export default function CabinCrewDashboard() {
                       <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse"></div>
                     </div>
                   </div>
-
-                  {/* Galley */}
                   <div className="bg-purple-500/20 border-y-2 border-purple-500/30 flex items-center justify-center py-2">
                     <span className="text-[8px] text-purple-400 font-bold tracking-widest">GALLEY</span>
                   </div>
 
-                  {/* Business Class - 1-2-1 layout */}
+                  {/* Business Class */}
                   <div className="bg-slate-800/50">
                     <div className="bg-slate-800 border-b border-slate-700 p-2">
                       <span className="text-[10px] text-slate-400 font-bold tracking-widest ml-2">BUSINESS CLASS (1-2-1) - Rows 1-8</span>
                     </div>
                     <div className="grid grid-rows-8 gap-1 p-2">
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map(row => (
+                      {[1,2,3,4,5,6,7,8].map(row => (
                         <div key={row} className="flex gap-3 items-center">
-                          {/* Left single seat */}
                           <div className="flex-1 flex justify-end px-2">
-                            <div 
-                              className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${
-                                isSeatOccupied(`${row}A`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}A
-                            </div>
+                            <div className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${isSeatOccupied(`${row}A`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}A</div>
                           </div>
-                          
-                          {/* Left aisle */}
                           <div className="w-12 bg-slate-700/30 rounded-lg relative flex-shrink-0">
-                            {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'left') && (
-                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-blue-400 rounded-full animate-bounce shadow-lg shadow-blue-400/50"></div>
-                            )}
+                            {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'left') && <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-blue-400 rounded-full animate-bounce shadow-lg shadow-blue-400/50"></div>}
                           </div>
-                          
-                          {/* Middle two seats */}
                           <div className="flex-1 flex gap-2 justify-center">
-                            <div 
-                              className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${
-                                isSeatOccupied(`${row}D`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}D
-                            </div>
-                            <div 
-                              className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${
-                                isSeatOccupied(`${row}G`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}G
-                            </div>
+                            <div className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${isSeatOccupied(`${row}D`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}D</div>
+                            <div className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${isSeatOccupied(`${row}G`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}G</div>
                           </div>
-                          
-                          {/* Right aisle */}
                           <div className="w-12 bg-slate-700/30 rounded-lg relative flex-shrink-0">
-                            {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'right') && (
-                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-blue-400 rounded-full animate-bounce shadow-lg shadow-blue-400/50"></div>
-                            )}
+                            {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'right') && <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-blue-400 rounded-full animate-bounce shadow-lg shadow-blue-400/50"></div>}
                           </div>
-                          
-                          {/* Right single seat */}
                           <div className="flex-1 flex justify-start px-2">
-                            <div 
-                              className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${
-                                isSeatOccupied(`${row}K`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}K
-                            </div>
+                            <div className={`w-14 h-10 rounded-lg border-2 flex items-center justify-center text-[8px] font-medium transition-all ${isSeatOccupied(`${row}K`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow-lg shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}K</div>
                           </div>
                         </div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Lavatories */}
                   <div className="flex">
                     <div className="flex-1 bg-yellow-500/20 border-y border-yellow-500/30 flex items-center justify-center py-2 relative">
                       <div className="absolute inset-0 border border-yellow-500/50 animate-pulse"></div>
@@ -458,259 +424,111 @@ export default function CabinCrewDashboard() {
                     </div>
                   </div>
 
-                  {/* Economy Class - 2-4-2 layout with 17 rows (9-25) */}
+                  {/* Economy Class */}
                   <div className="bg-slate-800/30">
                     <div className="bg-slate-800 border-b border-slate-700 p-2">
                       <span className="text-[10px] text-slate-400 font-bold tracking-widest ml-2">ECONOMY CLASS (2-4-2) - Rows 9-25</span>
                     </div>
                     <div className="grid grid-rows-17 gap-0.5 p-2">
-                      {[9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25].map(row => (
+                      {[9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25].map(row => (
                         <div key={row} className="flex gap-2 items-center">
-                          {/* Left two seats */}
                           <div className="flex-1 flex gap-1 justify-end px-1">
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}A`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}A
-                            </div>
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}B`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}B
-                            </div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}A`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}A</div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}B`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}B</div>
                           </div>
-                          
-                          {/* Left aisle */}
                           <div className="w-10 bg-slate-700/30 rounded-lg relative flex-shrink-0">
-                            {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && p.side === 'left') && (
-                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
-                            )}
+                            {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && p.side === 'left') && <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>}
                           </div>
-                          
-                          {/* Middle four seats */}
                           <div className="flex-1 flex gap-1 justify-center">
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}C`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}C
-                            </div>
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}D`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}D
-                            </div>
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}E`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}E
-                            </div>
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}F`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}F
-                            </div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}C`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}C</div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}D`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}D</div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}E`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}E</div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}F`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}F</div>
                           </div>
-                          
-                          {/* Right aisle */}
                           <div className="w-10 bg-slate-700/30 rounded-lg relative flex-shrink-0">
-                            {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && (p.side === 'right' || p.side === 'middle')) && (
-                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
-                            )}
+                            {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && (p.side === 'right' || p.side === 'middle')) && <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>}
                           </div>
-                          
-                          {/* Right two seats */}
                           <div className="flex-1 flex gap-1 justify-start px-1">
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}G`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}G
-                            </div>
-                            <div 
-                              className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${
-                                isSeatOccupied(`${row}H`) 
-                                  ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' 
-                                  : 'bg-transparent border-slate-600 text-slate-400'
-                              }`}
-                            >
-                              {row}H
-                            </div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}G`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}G</div>
+                            <div className={`w-12 h-9 rounded-lg border flex items-center justify-center text-[7px] font-medium transition-all ${isSeatOccupied(`${row}H`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}H</div>
                           </div>
                         </div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Lavatories */}
                   <div className="flex">
-                    <div className="flex-1 bg-yellow-500/20 border-y border-yellow-500/30 flex items-center justify-center py-2">
-                      <span className="text-[10px] text-yellow-400 font-bold">LAV C</span>
-                    </div>
+                    <div className="flex-1 bg-yellow-500/20 border-y border-yellow-500/30 flex items-center justify-center py-2"><span className="text-[10px] text-yellow-400 font-bold">LAV C</span></div>
                     <div className="flex-1 bg-yellow-500/20 border-y border-yellow-500/30 flex items-center justify-center py-2 relative">
                       <div className="absolute inset-0 border border-yellow-500/50 animate-pulse"></div>
                       <span className="text-[10px] text-yellow-400 font-bold">LAV D</span>
                     </div>
                   </div>
-
-                  {/* Galley */}
-                  <div className="bg-purple-500/20 border-y-2 border-purple-500/30 flex items-center justify-center py-2">
-                    <span className="text-[10px] text-purple-400 font-bold tracking-widest">GALLEY</span>
-                  </div>
-
-                  {/* Rear Cargo */}
-                  <div className="bg-slate-700/50 border-t-2 border-slate-600/50 flex items-center justify-center py-3">
-                    <span className="text-[10px] text-slate-400 font-bold tracking-widest">REAR CARGO</span>
-                  </div>
+                  <div className="bg-purple-500/20 border-y-2 border-purple-500/30 flex items-center justify-center py-2"><span className="text-[10px] text-purple-400 font-bold tracking-widest">GALLEY</span></div>
+                  <div className="bg-slate-700/50 border-t-2 border-slate-600/50 flex items-center justify-center py-3"><span className="text-[10px] text-slate-400 font-bold tracking-widest">REAR CARGO</span></div>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Events Panel - Right Panel - 1 part */}
+        {/* Events Panel - Right */}
         <div className="flex-1 bg-slate-800 rounded-xl border border-slate-700 overflow-hidden" style={{flex: 1}}>
           <div className="p-3 border-b border-slate-700 flex justify-between items-center bg-slate-800/80 shrink-0">
-            <h2 className="font-semibold flex items-center text-sm">
-              <AlertTriangle className="w-4 h-4 mr-2 text-orange-400" /> Identified Events
-            </h2>
-            {unreadAlertsCount > 0 && (
-              <span className="bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
-                {unreadAlertsCount} New
-              </span>
-            )}
+            <h2 className="font-semibold flex items-center text-sm"><AlertTriangle className="w-4 h-4 mr-2 text-orange-400" /> Identified Events</h2>
+            {unreadAlertsCount > 0 && <span className="bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">{unreadAlertsCount} New</span>}
           </div>
-
           <div className="p-3 space-y-2 overflow-y-auto" style={{height: 'calc(100% - 52px)'}}>
             {alerts.map((alert) => {
-              let styles = "";
-              let Icon = null;
-
-              if (alert.type === 'restricted') {
-                styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-red-900/20 border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.1)]";
-                Icon = ShieldAlert;
-              } else if (alert.type === 'suspicious') {
-                styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-orange-900/20 border-orange-500/50 shadow-[0_0_10px_rgba(249,115,22,0.1)]";
-                Icon = AlertTriangle;
-              } else {
-                styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-yellow-900/20 border-yellow-500/50";
-                Icon = Clock;
-              }
-
+              let styles = "", Icon = null;
+              if (alert.type === 'restricted') { styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-red-900/20 border-red-500/50 shadow-[0_0_10px_rgba(239,68,68,0.1)]"; Icon = ShieldAlert; }
+              else if (alert.type === 'suspicious') { styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-orange-900/20 border-orange-500/50 shadow-[0_0_10px_rgba(249,115,22,0.1)]"; Icon = AlertTriangle; }
+              else { styles = alert.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-yellow-900/20 border-yellow-500/50"; Icon = Clock; }
               return (
                 <div key={alert.id} className={`p-3 rounded-lg border transition-all ${styles}`}>
                   <div className="flex justify-between items-start mb-1.5">
                     <div className="flex items-center space-x-1.5">
                       <Icon className={`w-4 h-4 ${alert.resolved ? 'text-slate-500' : (alert.type === 'restricted' ? 'text-red-400' : alert.type === 'suspicious' ? 'text-orange-400' : 'text-yellow-400')}`} />
-                      <span className={`text-xs font-bold uppercase tracking-wider ${alert.resolved ? 'text-slate-500' : (alert.type === 'restricted' ? 'text-red-400' : alert.type === 'suspicious' ? 'text-orange-400' : 'text-yellow-400')}`}>
-                        {alert.type}
-                      </span>
+                      <span className={`text-xs font-bold uppercase tracking-wider ${alert.resolved ? 'text-slate-500' : (alert.type === 'restricted' ? 'text-red-400' : alert.type === 'suspicious' ? 'text-orange-400' : 'text-yellow-400')}`}>{alert.type}</span>
                     </div>
                     <span className="text-[10px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{alert.time}</span>
                   </div>
-                  <p className={`text-xs mb-3 leading-snug ${alert.resolved ? 'text-slate-400' : 'text-slate-200'}`}>
-                    {alert.message}
-                  </p>
-
+                  <p className={`text-xs mb-3 leading-snug ${alert.resolved ? 'text-slate-400' : 'text-slate-200'}`}>{alert.message}</p>
                   {!alert.resolved && (
                     <div className="flex space-x-2 mt-auto">
-                      <button
-                        onClick={() => resolveAlert(alert.id)}
-                        className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center active:scale-95"
-                      >
-                        <CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Acknowledge
-                      </button>
+                      <button onClick={() => resolveAlert(alert.id)} className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center active:scale-95"><CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Acknowledge</button>
                     </div>
                   )}
-                  {alert.resolved && (
-                    <div className="text-[10px] text-slate-500 flex items-center mt-auto">
-                      <CheckCircle className="w-3 h-3 mr-1" /> Handled by Crew
-                    </div>
-                  )}
+                  {alert.resolved && <div className="text-[10px] text-slate-500 flex items-center mt-auto"><CheckCircle className="w-3 h-3 mr-1" /> Handled by Crew</div>}
                 </div>
               );
             })}
-
             {Object.values(detectionAlerts).length > 0 && (
               <div className="border-t border-slate-700 pt-3 mt-3">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center">
-                  <Users className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
-                  AI Detection Events
-                </h3>
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center"><Users className="w-3.5 h-3.5 mr-1.5 text-blue-400" /> AI Detection Events</h3>
                 {Object.values(detectionAlerts).map((det) => (
-                  <div 
-                    key={det.id} 
-                    className={`p-3 rounded-lg border transition-all ${
-                      det.resolved 
-                        ? "bg-slate-900 border-slate-700 opacity-60" 
-                        : "bg-blue-900/20 border-blue-500/50 shadow-[0_0_10px_rgba(59,130,246,0.1)]"
-                    }`}
-                  >
+                  <div key={det.id} className={`p-3 rounded-lg border transition-all ${det.resolved ? "bg-slate-900 border-slate-700 opacity-60" : "bg-blue-900/20 border-blue-500/50 shadow-[0_0_10px_rgba(59,130,246,0.1)]"}`}>
                     <div className="flex justify-between items-start mb-1.5">
                       <div className="flex items-center space-x-1.5">
                         <Users className={`w-4 h-4 ${det.resolved ? 'text-slate-500' : 'text-blue-400'}`} />
-                        <span className={`text-xs font-bold uppercase tracking-wider ${det.resolved ? 'text-slate-500' : 'text-blue-400'}`}>
-                          Detection
-                        </span>
+                        <span className={`text-xs font-bold uppercase tracking-wider ${det.resolved ? 'text-slate-500' : 'text-blue-400'}`}>Detection</span>
                       </div>
                       <span className="text-[10px] font-mono text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded">{det.time}</span>
                     </div>
-                    <p className={`text-xs mb-2 leading-snug ${det.resolved ? 'text-slate-400' : 'text-slate-200'}`}>
-                      <span className="font-semibold">{det.label}</span> detected by {det.cameraName}
-                    </p>
-                    <div className="flex items-center justify-between text-[10px] mb-2">
-                      <span className="text-slate-400">Confidence: {(det.confidence * 100).toFixed(0)}%</span>
-                      <span className="text-slate-500">Count: {det.count}</span>
-                    </div>
-
+                    <p className={`text-xs mb-2 leading-snug ${det.resolved ? 'text-slate-400' : 'text-slate-200'}`}><span className="font-semibold">{det.label}</span> detected by {det.cameraName}</p>
+                    <div className="flex items-center justify-between text-[10px] mb-2"><span className="text-slate-400">Confidence: {(det.confidence * 100).toFixed(0)}%</span><span className="text-slate-500">Count: {det.count}</span></div>
                     {!det.resolved && (
                       <div className="flex space-x-2 mt-auto">
-                        <button
-                          onClick={() => resolveDetectionAlert(det.id)}
-                          className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center active:scale-95"
-                        >
-                          <CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Acknowledge
-                        </button>
+                        <button onClick={() => resolveDetectionAlert(det.id)} className="flex-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-1.5 rounded text-xs font-medium transition-colors flex items-center justify-center active:scale-95"><CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Acknowledge</button>
                       </div>
                     )}
-                    {det.resolved && (
-                      <div className="text-[10px] text-slate-500 flex items-center mt-auto">
-                        <CheckCircle className="w-3 h-3 mr-1" /> Handled by Crew
-                      </div>
-                    )}
+                    {det.resolved && <div className="text-[10px] text-slate-500 flex items-center mt-auto"><CheckCircle className="w-3 h-3 mr-1" /> Handled by Crew</div>}
                   </div>
                 ))}
               </div>
             )}
           </div>
         </div>
-
       </main>
     </div>
   );

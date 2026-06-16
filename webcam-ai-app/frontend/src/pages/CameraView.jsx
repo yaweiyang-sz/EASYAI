@@ -2,8 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { cameraApi, aiApi } from '../services/api'
 
-const API_BASE = '/api';
-
 function CameraView() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -22,83 +20,132 @@ function CameraView() {
   const [imageSize, setImageSize] = useState({ width: 640, height: 480 })
   const [streamingDetections, setStreamingDetections] = useState([])
   const [isStreaming, setIsStreaming] = useState(false)
-  const videoRef = useRef(null)
-  const containerRef = useRef(null)
-  const eventSourceRef = useRef(null)
+  const [wsConnected, setWsConnected] = useState(false)
 
+  // Refs for direct DOM manipulation (bypass React for frame rendering)
+  const containerRef = useRef(null)
+  const canvasRef = useRef(null)  // hidden canvas for decoding base64
+  const imgRef = useRef(null)     // <img> element for display
+  const wsRef = useRef(null)
+  const reconnectTimerRef = useRef(null)
+  const mountedRef = useRef(true)
+  const streamStateRef = useRef({
+    detections: [],
+    lastDetectionUpdate: 0,
+  })
+
+  // ── Direct DOM frame rendering (bypass React state) ──
+  const renderFrame = useCallback((base64Data) => {
+    if (!mountedRef.current) return
+    const img = imgRef.current
+    if (!img) return
+
+    // Use Object URL for memory-efficient rendering
+    if (img._objectUrl) {
+      URL.revokeObjectURL(img._objectUrl)
+    }
+
+    // Decode base64 to binary, then create blob URL
+    const binaryStr = atob(base64Data)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i)
+    }
+    const blob = new Blob([bytes], { type: 'image/jpeg' })
+    img._objectUrl = URL.createObjectURL(blob)
+    img.src = img._objectUrl
+  }, [])
+
+  // ── WebSocket ──
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+
+    if (!mountedRef.current) return
+
+    const wsUrl = cameraApi.getWebSocketUrl(id)
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      if (!mountedRef.current) { ws.close(); return }
+      setWsConnected(true)
+      setError(null)
+    }
+
+    ws.onmessage = (event) => {
+      if (!mountedRef.current) return
+      try {
+        const data = JSON.parse(event.data)
+
+        if (data.type === 'frame' && data.frame) {
+          // Direct DOM update — NO React state for frame
+          renderFrame(data.frame)
+
+          // Throttle detection updates to 4 Hz max to avoid React re-render storm
+          if (data.detections && data.detections.length > 0) {
+            const now = Date.now()
+            if (now - streamStateRef.current.lastDetectionUpdate > 250) {
+              streamStateRef.current.lastDetectionUpdate = now
+              setStreamingDetections(data.detections)
+            }
+          }
+        } else if (data.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong' }))
+        }
+      } catch (err) {
+        console.error('[CameraView] Frame parse error:', err)
+      }
+    }
+
+    ws.onclose = (event) => {
+      wsRef.current = null
+      setWsConnected(false)
+      if (!mountedRef.current) return
+      reconnectTimerRef.current = setTimeout(() => connectWebSocket(), 2000)
+    }
+
+    ws.onerror = () => {}
+  }, [id, renderFrame])
+
+  const disconnectWebSocket = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+    if (wsRef.current) {
+      wsRef.current.onclose = null
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    setStreamingDetections([])
+    setWsConnected(false)
+  }, [])
+
+  // ── Lifecycle ──
   useEffect(() => {
+    mountedRef.current = true
     loadCamera()
     loadAlgorithms()
-    
+    connectWebSocket()
+
     return () => {
-      setRoiMode(false)
-      setRoiStart(null)
-      setRoiEnd(null)
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close()
+      mountedRef.current = false
+      disconnectWebSocket()
+      // Clean up any remaining object URL
+      const img = imgRef.current
+      if (img && img._objectUrl) {
+        URL.revokeObjectURL(img._objectUrl)
       }
     }
   }, [id])
-
-  useEffect(() => {
-    const enabledAlgo = camera?.algorithms?.find(a => a.enabled)
-    if (enabledAlgo && !isStreaming) {
-      startDetectionStream()
-    } else if (!enabledAlgo && isStreaming) {
-      stopDetectionStream()
-    }
-  }, [camera?.algorithms, isStreaming])
-
-  useEffect(() => {
-    if (selectedAlgoConfig?.enabled && !isStreaming) {
-      startDetectionStream()
-    } else if (!selectedAlgoConfig?.enabled && isStreaming) {
-      stopDetectionStream()
-    }
-  }, [selectedAlgoConfig?.enabled])
-
-  const startDetectionStream = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-    }
-    
-    try {
-      const url = `${API_BASE}/stream/${id}/events`
-      eventSourceRef.current = new EventSource(url)
-      eventSourceRef.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          handleDetectionMessage(data)
-        } catch (err) {
-          console.error('Failed to parse detection event:', err)
-        }
-      }
-      eventSourceRef.current.onerror = (error) => {
-        console.error('EventSource error:', error)
-        eventSourceRef.current?.close()
-        eventSourceRef.current = null
-      }
-      setIsStreaming(true)
-      console.log('Detection stream started')
-    } catch (err) {
-      console.error('Failed to start detection stream:', err)
-    }
-  }
-
-  const stopDetectionStream = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-      eventSourceRef.current = null
-    }
-    setIsStreaming(false)
-    setStreamingDetections([])
-    console.log('Detection stream stopped')
-  }
-
-  const handleDetectionMessage = (data) => {
-    const { detections } = data
-    setStreamingDetections(detections || [])
-  }
 
   useEffect(() => {
     if (selectedAlgoConfig) {
@@ -106,44 +153,49 @@ function CameraView() {
     }
   }, [selectedAlgoConfig])
 
+  // ── Data loading ──
   const loadCamera = async () => {
     try {
       const data = await cameraApi.get(id)
+      if (!mountedRef.current) return
       setCamera(data)
       if (data.algorithms && data.algorithms.length > 0) {
         setSelectedAlgoConfig(data.algorithms[0])
       }
     } catch (err) {
-      setError(err.message)
+      if (mountedRef.current) setError(err.message)
     } finally {
-      setLoading(false)
+      if (mountedRef.current) setLoading(false)
     }
   }
 
   const loadAlgorithms = async () => {
     try {
       const data = await aiApi.listAlgorithms()
-      setAlgorithms(data)
-    } catch (err) {
-      console.error('Failed to load algorithms:', err)
-    }
+      if (mountedRef.current) setAlgorithms(data)
+    } catch (err) { /* ignore */ }
   }
 
   const loadClasses = async (algorithmType) => {
     try {
       const data = await aiApi.getClasses(algorithmType)
-      setClasses(data.classes)
-    } catch (err) {
-      console.error('Failed to load classes:', err)
-    }
+      if (mountedRef.current) setClasses(data.classes)
+    } catch (err) { /* ignore */ }
   }
 
+  // ── Algorithm config ──
   const handleAlgoChange = (algoId) => {
-    if (camera && camera.algorithms) {
+    if (camera?.algorithms) {
       const algo = camera.algorithms.find(a => a.id === algoId)
       if (algo) {
         setSelectedAlgoConfig(algo)
-        setRoi(algo.roi)
+        if (algo.roi) {
+          setRoiStart({ x: algo.roi.x1, y: algo.roi.y1 })
+          setRoiEnd({ x: algo.roi.x2, y: algo.roi.y2 })
+        } else {
+          setRoiStart(null)
+          setRoiEnd(null)
+        }
       }
     }
   }
@@ -160,7 +212,7 @@ function CameraView() {
   const updateAlgoConfig = async (newConfig) => {
     setSelectedAlgoConfig(newConfig)
     if (camera) {
-      const updatedAlgos = camera.algorithms.map(a => 
+      const updatedAlgos = camera.algorithms.map(a =>
         a.id === newConfig.id ? newConfig : a
       )
       try {
@@ -178,37 +230,25 @@ function CameraView() {
     }
   }
 
+  // ── ROI drawing ──
   const handleClick = (e) => {
-    if (!roiMode || !videoRef.current) return
-    
-    const rect = videoRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    
+    if (!roiMode || !containerRef.current) return
+    const rect = containerRef.current.getBoundingClientRect()
     const scaleX = imageSize.width / rect.width
     const scaleY = imageSize.height / rect.height
-    
-    const clickPos = { x: Math.round(x * scaleX), y: Math.round(y * scaleY) }
-    
+    const clickPos = { x: Math.round((e.clientX - rect.left) * scaleX), y: Math.round((e.clientY - rect.top) * scaleY) }
+
     if (!roiStart) {
-      // First click: set start point
       setRoiStart(clickPos)
       setRoiEnd(null)
     } else {
-      // Second click: set end point and save
       const x1 = Math.min(roiStart.x, clickPos.x)
       const y1 = Math.min(roiStart.y, clickPos.y)
       const x2 = Math.max(roiStart.x, clickPos.x)
       const y2 = Math.max(roiStart.y, clickPos.y)
-      
-      if (x2 - x1 > 10 && y2 - y1 > 10) {
-        const newRoi = { x1, y1, x2, y2 }
-        if (selectedAlgoConfig) {
-          updateAlgoConfig({ ...selectedAlgoConfig, roi: newRoi })
-        }
+      if (x2 - x1 > 10 && y2 - y1 > 10 && selectedAlgoConfig) {
+        updateAlgoConfig({ ...selectedAlgoConfig, roi: { x1, y1, x2, y2 } })
       }
-      
-      // Reset after saving
       setRoiStart(null)
       setRoiEnd(null)
       setRoiMode(false)
@@ -216,7 +256,6 @@ function CameraView() {
   }
 
   const handleDoubleClick = (e) => {
-    // Cancel current selection on double click
     if (roiMode && roiStart) {
       e.preventDefault()
       e.stopPropagation()
@@ -226,20 +265,13 @@ function CameraView() {
   }
 
   const handleMouseMove = (e) => {
-    if (!roiMode || !roiStart || !videoRef.current) return
-    
-    const rect = videoRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const y = e.clientY - rect.top
-    
+    if (!roiMode || !roiStart || !containerRef.current) return
+    const rect = containerRef.current.getBoundingClientRect()
     const scaleX = imageSize.width / rect.width
     const scaleY = imageSize.height / rect.height
-    
-    // Update preview during mouse move
-    setRoiEnd({ x: Math.round(x * scaleX), y: Math.round(y * scaleY) })
+    setRoiEnd({ x: Math.round((e.clientX - rect.left) * scaleX), y: Math.round((e.clientY - rect.top) * scaleY) })
   }
 
-  // Handle image load to get actual dimensions
   const handleImageLoad = useCallback((e) => {
     const img = e.target
     if (img.naturalWidth && img.naturalHeight) {
@@ -256,58 +288,34 @@ function CameraView() {
     setRoiEnd(null)
   }
 
-  const setRoi = (roi) => {
-    // Update local state for display
-    if (roi) {
-      setRoiStart({ x: roi.x1, y: roi.y1 })
-      setRoiEnd({ x: roi.x2, y: roi.y2 })
-    } else {
-      setRoiStart(null)
-      setRoiEnd(null)
-    }
-  }
-
   const captureAndProcess = async () => {
-    if (!videoRef.current || !selectedAlgoConfig) return
+    if (!selectedAlgoConfig) return
+    const img = imgRef.current
+    if (!img || !img.src) return
 
     setProcessing(true)
     try {
-      const canvas = document.createElement('canvas')
-      canvas.width = videoRef.current.naturalWidth || videoRef.current.width
-      canvas.height = videoRef.current.naturalHeight || videoRef.current.height
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(videoRef.current, 0, 0)
-
-      canvas.toBlob(async (blob) => {
-        try {
-          const result = await aiApi.processImage(
-            blob,
-            id,
-            selectedAlgoConfig.algorithm_type,
-            selectedAlgoConfig.confidence,
-            selectedAlgoConfig.roi,
-            selectedAlgoConfig.classes
-          )
-          setResults(result)
-        } catch (err) {
-          console.error('AI processing error:', err)
-        } finally {
-          setProcessing(false)
-        }
-      }, 'image/jpeg')
+      const response = await fetch(img.src)
+      const blob = await response.blob()
+      const result = await aiApi.processImage(
+        blob, id,
+        selectedAlgoConfig.algorithm_type,
+        selectedAlgoConfig.confidence,
+        selectedAlgoConfig.roi,
+        selectedAlgoConfig.classes
+      )
+      setResults(result)
     } catch (err) {
-      console.error('Capture error:', err)
+      console.error('AI processing error:', err)
+    } finally {
       setProcessing(false)
     }
   }
 
-  const toggleFullscreen = () => {
-    setIsFullscreen(!isFullscreen)
-  }
+  const toggleFullscreen = () => setIsFullscreen(!isFullscreen)
 
   const addAlgorithm = async () => {
     if (!camera) return
-    
     const newAlgo = {
       id: `algo_${Date.now()}`,
       name: 'New Algorithm',
@@ -317,7 +325,6 @@ function CameraView() {
       roi: null,
       classes: []
     }
-    
     const updatedAlgos = [...camera.algorithms, newAlgo]
     try {
       await cameraApi.update(id, { algorithms: updatedAlgos })
@@ -330,7 +337,6 @@ function CameraView() {
 
   const deleteAlgorithm = async () => {
     if (!camera || !selectedAlgoConfig || camera.algorithms.length <= 1) return
-    
     const updatedAlgos = camera.algorithms.filter(a => a.id !== selectedAlgoConfig.id)
     try {
       await cameraApi.update(id, { algorithms: updatedAlgos })
@@ -344,8 +350,6 @@ function CameraView() {
   if (loading) return <div className="empty-state">Loading...</div>
   if (error) return <div className="empty-state">Error: {error}</div>
   if (!camera) return <div className="empty-state">Camera not found</div>
-
-  const streamUrl = cameraApi.getStreamUrl(id, false, null)
 
   return (
     <div className={`camera-view-container ${isFullscreen ? 'fullscreen' : ''}`}>
@@ -363,22 +367,27 @@ function CameraView() {
 
       <div className="camera-view-body">
         <div className="video-panel">
-          <div 
+          <div
             ref={containerRef}
             className={`video-container ${isFullscreen ? 'fullscreen-video' : ''}`}
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
             onMouseMove={handleMouseMove}
           >
+            {/* Direct DOM img — NOT controlled by React state */}
             <img
-              ref={videoRef}
-              src={streamUrl}
+              ref={imgRef}
               alt="Live Stream"
               className="video-stream"
               onLoad={handleImageLoad}
-              style={{ cursor: roiMode ? 'crosshair' : 'default' }}
+              style={{ cursor: roiMode ? 'crosshair' : 'default', display: wsConnected ? 'block' : 'none' }}
             />
-            
+            {!wsConnected && (
+              <div className="video-stream-placeholder">
+                Connecting to stream...
+              </div>
+            )}
+
             {roiMode && !roiStart && (
               <div className="roi-overlay">
                 <div className="roi-hint">
@@ -386,7 +395,6 @@ function CameraView() {
                 </div>
               </div>
             )}
-            
             {roiMode && roiStart && !roiEnd && (
               <div className="roi-overlay">
                 <div className="roi-hint roi-active">
@@ -394,41 +402,27 @@ function CameraView() {
                 </div>
               </div>
             )}
-            
             {roiStart && roiEnd && (
-              <div 
-                className="roi-preview"
-                style={{
-                  left: `${Math.min(roiStart.x, roiEnd.x) * 100 / imageSize.width}%`,
-                  top: `${Math.min(roiStart.y, roiEnd.y) * 100 / imageSize.height}%`,
-                  width: `${Math.abs(roiEnd.x - roiStart.x) * 100 / imageSize.width}%`,
-                  height: `${Math.abs(roiEnd.y - roiStart.y) * 100 / imageSize.height}%`
-                }}
-              />
+              <div className="roi-preview" style={{
+                left: `${Math.min(roiStart.x, roiEnd.x) * 100 / imageSize.width}%`,
+                top: `${Math.min(roiStart.y, roiEnd.y) * 100 / imageSize.height}%`,
+                width: `${Math.abs(roiEnd.x - roiStart.x) * 100 / imageSize.width}%`,
+                height: `${Math.abs(roiEnd.y - roiStart.y) * 100 / imageSize.height}%`
+              }} />
             )}
-            
             {roiStart && !roiEnd && (
-              <>
-                <div 
-                  className="roi-point roi-start-point"
-                  style={{
-                    left: `${roiStart.x * 100 / imageSize.width}%`,
-                    top: `${roiStart.y * 100 / imageSize.height}%`
-                  }}
-                />
-              </>
+              <div className="roi-point roi-start-point" style={{
+                left: `${roiStart.x * 100 / imageSize.width}%`,
+                top: `${roiStart.y * 100 / imageSize.height}%`
+              }} />
             )}
-            
             {selectedAlgoConfig?.roi && !roiMode && (
-              <div 
-                className="roi-box"
-                style={{
-                  left: `${selectedAlgoConfig.roi.x1 * 100 / imageSize.width}%`,
-                  top: `${selectedAlgoConfig.roi.y1 * 100 / imageSize.height}%`,
-                  width: `${(selectedAlgoConfig.roi.x2 - selectedAlgoConfig.roi.x1) * 100 / imageSize.width}%`,
-                  height: `${(selectedAlgoConfig.roi.y2 - selectedAlgoConfig.roi.y1) * 100 / imageSize.height}%`
-                }}
-              />
+              <div className="roi-box" style={{
+                left: `${selectedAlgoConfig.roi.x1 * 100 / imageSize.width}%`,
+                top: `${selectedAlgoConfig.roi.y1 * 100 / imageSize.height}%`,
+                width: `${(selectedAlgoConfig.roi.x2 - selectedAlgoConfig.roi.x1) * 100 / imageSize.width}%`,
+                height: `${(selectedAlgoConfig.roi.y2 - selectedAlgoConfig.roi.y1) * 100 / imageSize.height}%`
+              }} />
             )}
           </div>
         </div>
@@ -447,15 +441,9 @@ function CameraView() {
 
             {camera.algorithms && camera.algorithms.length > 0 && (
               <div className="algo-selector">
-                <select 
-                  value={selectedAlgoConfig?.id || ''}
-                  onChange={(e) => handleAlgoChange(e.target.value)}
-                  className="settings-select"
-                >
+                <select value={selectedAlgoConfig?.id || ''} onChange={(e) => handleAlgoChange(e.target.value)} className="settings-select">
                   {camera.algorithms.map(algo => (
-                    <option key={algo.id} value={algo.id}>
-                      {algo.name} ({algo.algorithm_type})
-                    </option>
+                    <option key={algo.id} value={algo.id}>{algo.name} ({algo.algorithm_type})</option>
                   ))}
                 </select>
               </div>
@@ -464,112 +452,56 @@ function CameraView() {
             {selectedAlgoConfig && (
               <div className="ai-settings">
                 <div className="settings-row">
-                  <input
-                    type="text"
-                    value={selectedAlgoConfig.name}
+                  <input type="text" value={selectedAlgoConfig.name}
                     onChange={(e) => updateAlgoConfig({ ...selectedAlgoConfig, name: e.target.value })}
-                    className="settings-input"
-                    placeholder="Algorithm name"
-                  />
+                    className="settings-input" placeholder="Algorithm name" />
                 </div>
-
                 <div className="settings-row">
                   <label className="setting-label">
-                    <input
-                      type="checkbox"
-                      checked={selectedAlgoConfig.enabled}
-                      onChange={(e) => updateAlgoConfig({ ...selectedAlgoConfig, enabled: e.target.checked })}
-                    />
+                    <input type="checkbox" checked={selectedAlgoConfig.enabled}
+                      onChange={(e) => updateAlgoConfig({ ...selectedAlgoConfig, enabled: e.target.checked })} />
                     Enabled
                   </label>
                 </div>
-
                 <div className="settings-row">
-                  <label className="setting-label">
-                    Confidence: {selectedAlgoConfig.confidence.toFixed(2)}
-                  </label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={selectedAlgoConfig.confidence}
-                    onChange={(e) => handleConfidenceChange(e.target.value)}
-                    className="settings-slider"
-                  />
+                  <label className="setting-label">Confidence: {selectedAlgoConfig.confidence.toFixed(2)}</label>
+                  <input type="range" min="0" max="1" step="0.05" value={selectedAlgoConfig.confidence}
+                    onChange={(e) => handleConfidenceChange(e.target.value)} className="settings-slider" />
                 </div>
-
                 <div className="settings-row roi-section">
-                  <button 
-                    className={`btn btn-small ${roiMode ? 'btn-primary active' : 'btn-secondary'}`}
-                    onClick={() => {
-                      setRoiMode(!roiMode)
-                      if (!roiMode) {
-                        setRoiStart(null)
-                        setRoiEnd(null)
-                      }
-                    }}
-                  >
+                  <button className={`btn btn-small ${roiMode ? 'btn-primary active' : 'btn-secondary'}`}
+                    onClick={() => { setRoiMode(!roiMode); if (roiMode) { setRoiStart(null); setRoiEnd(null) } }}>
                     {roiMode ? 'Cancel ROI' : 'Draw ROI'}
                   </button>
                   {selectedAlgoConfig.roi && (
-                    <button className="btn btn-small btn-danger" onClick={clearRoi}>
-                      Clear ROI
-                    </button>
+                    <button className="btn btn-small btn-danger" onClick={clearRoi}>Clear ROI</button>
                   )}
                 </div>
-                
                 {selectedAlgoConfig.roi && (
                   <div className="roi-info">
                     <span className="roi-label">ROI: </span>
-                    <span className="roi-coords">
-                      ({selectedAlgoConfig.roi.x1}, {selectedAlgoConfig.roi.y1}) - 
-                      ({selectedAlgoConfig.roi.x2}, {selectedAlgoConfig.roi.y2})
-                    </span>
+                    <span className="roi-coords">({selectedAlgoConfig.roi.x1}, {selectedAlgoConfig.roi.y1}) - ({selectedAlgoConfig.roi.x2}, {selectedAlgoConfig.roi.y2})</span>
                   </div>
                 )}
-
                 {selectedAlgoConfig.algorithm_type === 'object_detection' && classes.length > 0 && (
                   <div className="classes-filter">
                     <label className="setting-label">Detection Classes:</label>
                     <div className="classes-grid">
                       {classes.slice(0, 4).map((cls) => (
-                        <label 
-                          key={cls} 
-                          className={`class-checkbox ${(selectedAlgoConfig.classes || []).includes(cls) ? 'selected' : ''}`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={(selectedAlgoConfig.classes || []).includes(cls)}
-                            onChange={() => handleClassToggle(cls)}
-                          />
+                        <label key={cls} className={`class-checkbox ${(selectedAlgoConfig.classes || []).includes(cls) ? 'selected' : ''}`}>
+                          <input type="checkbox" checked={(selectedAlgoConfig.classes || []).includes(cls)} onChange={() => handleClassToggle(cls)} />
                           <span>{cls}</span>
                         </label>
                       ))}
                     </div>
                     <div className="classes-actions">
-                      <button 
-                        className="btn btn-small" 
-                        onClick={() => updateAlgoConfig({ ...selectedAlgoConfig, classes: [...classes.slice(0, 4)] })}
-                      >
-                        Select All
-                      </button>
-                      <button 
-                        className="btn btn-small" 
-                        onClick={() => updateAlgoConfig({ ...selectedAlgoConfig, classes: [] })}
-                      >
-                        Clear All
-                      </button>
+                      <button className="btn btn-small" onClick={() => updateAlgoConfig({ ...selectedAlgoConfig, classes: [...classes.slice(0, 4)] })}>Select All</button>
+                      <button className="btn btn-small" onClick={() => updateAlgoConfig({ ...selectedAlgoConfig, classes: [] })}>Clear All</button>
                     </div>
                   </div>
                 )}
-
                 <div className="action-row">
-                  <button
-                    className="btn btn-primary"
-                    onClick={captureAndProcess}
-                    disabled={processing || !selectedAlgoConfig.enabled}
-                  >
+                  <button className="btn btn-primary" onClick={captureAndProcess} disabled={processing || !selectedAlgoConfig.enabled}>
                     {processing ? 'Processing...' : 'Capture & Analyze'}
                   </button>
                 </div>
@@ -580,10 +512,7 @@ function CameraView() {
           {results && (
             <div className="results-panel">
               <h3>Analysis Results</h3>
-              <p className="processing-time">
-                Processing time: {results.processing_time_ms.toFixed(2)}ms
-              </p>
-
+              <p className="processing-time">Processing time: {results.processing_time_ms.toFixed(2)}ms</p>
               {results.detections && results.detections.length > 0 && (
                 <div className="detections-section">
                   <h4>Detected Objects ({results.detections.length})</h4>
@@ -592,28 +521,18 @@ function CameraView() {
                       <div key={idx} className="detection-item">
                         <div className="detection-info">
                           <span className="detection-label">{det.label}</span>
-                          <span className="detection-confidence">
-                            {(det.confidence * 100).toFixed(1)}%
-                          </span>
+                          <span className="detection-confidence">{(det.confidence * 100).toFixed(1)}%</span>
                         </div>
-                        <div className="detection-bbox">
-                          [{det.bbox[0].toFixed(0)}, {det.bbox[1].toFixed(0)}, 
-                           {det.bbox[2].toFixed(0)}, {det.bbox[3].toFixed(0)}]
-                        </div>
+                        <div className="detection-bbox">[{det.bbox[0].toFixed(0)}, {det.bbox[1].toFixed(0)}, {det.bbox[2].toFixed(0)}, {det.bbox[3].toFixed(0)}]</div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-
               {results.annotated_frame && (
                 <div className="annotated-image">
                   <h4>Annotated Image</h4>
-                  <img 
-                    src={`data:image/jpeg;base64,${results.annotated_frame}`} 
-                    alt="Annotated"
-                    className="annotated-img"
-                  />
+                  <img src={`data:image/jpeg;base64,${results.annotated_frame}`} alt="Annotated" className="annotated-img" />
                 </div>
               )}
             </div>
@@ -623,11 +542,10 @@ function CameraView() {
             <div className="panel-header">
               <h3>Detection Messages</h3>
               <div className="stream-status">
-                <span className={`status-indicator ${isStreaming ? 'active' : 'inactive'}`}></span>
-                {isStreaming ? 'Live' : 'Stopped'}
+                <span className={`status-indicator ${wsConnected ? 'active' : 'inactive'}`}></span>
+                {wsConnected ? 'Live' : 'Disconnected'}
               </div>
             </div>
-            
             {streamingDetections.length > 0 ? (
               <div className="current-detections">
                 <h4>Current Detection</h4>
@@ -636,9 +554,7 @@ function CameraView() {
                     <div key={`current-${idx}`} className="detection-item current">
                       <div className="detection-info">
                         <span className="detection-label">{det.label}</span>
-                        <span className="detection-confidence">
-                          {(det.confidence * 100).toFixed(1)}%
-                        </span>
+                        <span className="detection-confidence">{(det.confidence * 100).toFixed(1)}%</span>
                       </div>
                     </div>
                   ))}
@@ -646,7 +562,7 @@ function CameraView() {
               </div>
             ) : (
               <div className="empty-messages">
-                {isStreaming ? 'Waiting for detections...' : 'Detection stream is stopped'}
+                {wsConnected ? 'Waiting for detections...' : 'Detection stream is stopped'}
               </div>
             )}
           </div>
