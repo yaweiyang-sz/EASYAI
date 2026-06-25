@@ -3,6 +3,10 @@
 
 import { cameraApi } from './api';
 
+const RECONNECT_BASE_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 10000;
+const IDLE_DISCONNECT_DELAY_MS = 5000;
+
 const state = {
   // cameraId -> { ws, subscribers: Set<{ onFrame, onDetection, onClose, onOpen }> }
   cameras: {},
@@ -14,10 +18,29 @@ function getOrCreate(cameraId) {
       ws: null,
       subscribers: new Set(),
       reconnectTimer: null,
+      idleTimer: null,
+      reconnectAttempts: 0,
       destroyed: false,
     };
   }
   return state.cameras[cameraId];
+}
+
+function notifySubscribers(cam, callbackName, ...args) {
+  cam.subscribers.forEach(subscriber => {
+    try { subscriber[callbackName]?.(...args); } catch (e) { /* isolate subscribers */ }
+  });
+}
+
+function scheduleReconnect(cameraId, cam) {
+  if (cam.destroyed || cam.subscribers.size === 0 || cam.reconnectTimer) return;
+
+  cam.reconnectAttempts += 1;
+  const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (cam.reconnectAttempts - 1), RECONNECT_MAX_DELAY_MS);
+  cam.reconnectTimer = setTimeout(() => {
+    cam.reconnectTimer = null;
+    connect(cameraId);
+  }, delay);
 }
 
 function connect(cameraId) {
@@ -27,13 +50,17 @@ function connect(cameraId) {
     return;
   }
 
+  if (cam.idleTimer) {
+    clearTimeout(cam.idleTimer);
+    cam.idleTimer = null;
+  }
+
   const ws = new WebSocket(cameraApi.getWebSocketUrl(cameraId));
   cam.ws = ws;
 
   ws.onopen = () => {
-    cam.subscribers.forEach(sub => {
-      try { sub.onOpen?.(); } catch (e) { /* ignore */ }
-    });
+    cam.reconnectAttempts = 0;
+    notifySubscribers(cam, 'onOpen');
   };
 
   ws.onmessage = (event) => {
@@ -42,27 +69,21 @@ function connect(cameraId) {
       const data = JSON.parse(event.data);
 
       if (data.type === 'frame' && data.frame) {
-        cam.subscribers.forEach(sub => {
-          try { sub.onFrame?.(data.frame, data); } catch (e) { /* ignore */ }
-        });
-      } else if (data.type === 'ping') {
+        notifySubscribers(cam, 'onFrame', data.frame, data);
+      } else if (data.type === 'ping' && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'pong' }));
       }
     } catch (err) {
-      // ignore parse errors
+      // ignore malformed stream messages
     }
   };
 
   ws.onerror = () => {};
 
   ws.onclose = () => {
-    cam.ws = null;
-    cam.subscribers.forEach(sub => {
-      try { sub.onClose?.(); } catch (e) { /* ignore */ }
-    });
-    if (!cam.destroyed && cam.subscribers.size > 0) {
-      cam.reconnectTimer = setTimeout(() => connect(cameraId), 3000);
-    }
+    if (cam.ws === ws) cam.ws = null;
+    notifySubscribers(cam, 'onClose');
+    scheduleReconnect(cameraId, cam);
   };
 }
 
@@ -73,6 +94,11 @@ function disconnect(cameraId) {
     clearTimeout(cam.reconnectTimer);
     cam.reconnectTimer = null;
   }
+  if (cam.idleTimer) {
+    clearTimeout(cam.idleTimer);
+    cam.idleTimer = null;
+  }
+  cam.reconnectAttempts = 0;
   if (cam.ws) {
     cam.ws.onclose = null; // prevent reconnect
     cam.ws.close();
@@ -100,23 +126,29 @@ function destroyAll() {
  */
 export function subscribe(cameraId, callbacks) {
   const cam = getOrCreate(cameraId);
+  cam.destroyed = false;
   cam.subscribers.add(callbacks);
 
+  if (cam.idleTimer) {
+    clearTimeout(cam.idleTimer);
+    cam.idleTimer = null;
+  }
+
   // Auto-connect if not already connected
-  if (!cam.ws || cam.ws.readyState !== WebSocket.OPEN) {
+  if (!cam.ws || cam.ws.readyState === WebSocket.CLOSED || cam.ws.readyState === WebSocket.CLOSING) {
     connect(cameraId);
   }
 
   return () => {
     cam.subscribers.delete(callbacks);
-    // If no more subscribers, clean up after a delay
-    if (cam.subscribers.size === 0) {
-      // Keep alive for a short time in case user navigates back quickly
-      setTimeout(() => {
+    // If no more subscribers, clean up after a delay.
+    // Keep alive briefly in case the user navigates between dashboard/detail views.
+    if (cam.subscribers.size === 0 && !cam.idleTimer) {
+      cam.idleTimer = setTimeout(() => {
         if (cam.subscribers.size === 0) {
           disconnect(cameraId);
         }
-      }, 5000);
+      }, IDLE_DISCONNECT_DELAY_MS);
     }
   };
 }

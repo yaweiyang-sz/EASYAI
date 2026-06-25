@@ -968,3 +968,56 @@ body {
   padding: 1rem;
   font-size: 0.85rem;
 }
+
+/* Responsive operator layout refinements */
+@media (max-width: 1180px) {
+  .camera-view-body {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .video-panel {
+    min-height: 52vh;
+  }
+
+  .control-panel {
+    max-width: none;
+    min-width: 0;
+    height: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .camera-view-container {
+    padding: 0.75rem;
+    overflow-y: auto;
+  }
+
+  .camera-view-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .header-actions,
+  .settings-row,
+  .classes-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .header-actions .btn,
+  .classes-actions .btn {
+    flex: 1;
+  }
+
+  .video-panel {
+    min-height: 42vh;
+  }
+
+  .algorithm-panel,
+  .results-panel,
+  .detection-messages-panel {
+    padding: 0.85rem;
+  }
+}
