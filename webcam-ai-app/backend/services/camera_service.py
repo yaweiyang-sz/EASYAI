@@ -42,6 +42,7 @@ class FrameReaderThread:
         self.frame_lock = threading.Lock()
         self.error_count = 0
         self.max_errors = 10
+        self.max_stale_seconds = 5.0
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
 
@@ -75,6 +76,25 @@ class FrameReaderThread:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
             return None
+
+    def frame_age(self) -> Optional[float]:
+        """Return seconds since the last successful frame, or None if no frame arrived yet."""
+        with self.frame_lock:
+            if self.latest_frame_ts <= 0:
+                return None
+            return time.time() - self.latest_frame_ts
+
+    def is_stale(self) -> bool:
+        """Detect a reader that still looks connected but has stopped producing frames."""
+        age = self.frame_age()
+        return age is not None and age > self.max_stale_seconds
+
+    def mark_disconnected(self):
+        """Drop stale frame data and mark the stream disconnected."""
+        with self.frame_lock:
+            self.latest_frame = None
+            self.latest_frame_ts = 0.0
+        self.status = ConnectionStatus.DISCONNECTED
 
     def _open_cap(self) -> bool:
         """Open the video capture. Returns True on success."""
@@ -126,6 +146,9 @@ class FrameReaderThread:
             if self.cap is None or not self.cap.isOpened():
                 self.status = ConnectionStatus.CONNECTING
                 if self._open_cap():
+                    with self.frame_lock:
+                        self.latest_frame = None
+                        self.latest_frame_ts = 0.0
                     self.status = ConnectionStatus.CONNECTED
                     self.error_count = 0
                     print(f"[INFO] Connected to camera {self.camera_id}")
@@ -151,7 +174,7 @@ class FrameReaderThread:
                         except Exception:
                             pass
                         self.cap = None
-                        self.status = ConnectionStatus.DISCONNECTED
+                        self.mark_disconnected()
                         self.error_count = 0
                         self.stop_event.wait(2.0)
             except Exception as e:
@@ -163,7 +186,7 @@ class FrameReaderThread:
                     except Exception:
                         pass
                     self.cap = None
-                    self.status = ConnectionStatus.DISCONNECTED
+                    self.mark_disconnected()
                     self.error_count = 0
                     self.stop_event.wait(2.0)
 
@@ -293,8 +316,8 @@ class CameraService:
             return False
 
         existing = self.frame_readers.get(camera_id)
-        if existing and existing.status == ConnectionStatus.CONNECTED:
-            return True  # already running, nothing to do
+        if existing and existing.status == ConnectionStatus.CONNECTED and not existing.is_stale():
+            return True  # already running and producing frames, nothing to do
 
         # Stop only if there's a stale/disconnected reader
         if existing:
@@ -324,6 +347,15 @@ class CameraService:
 
         if not reader:
             return None
+
+        if reader.status == ConnectionStatus.CONNECTED and reader.is_stale():
+            age = reader.frame_age()
+            print(f"[WARN] Camera {camera_id} frame stream stale for {age:.1f}s, restarting reader")
+            await self._stop_reader_async(camera_id)
+            await self._start_reader_async(camera_id)
+            reader = self.frame_readers.get(camera_id)
+            if not reader:
+                return None
 
         loop = asyncio.get_running_loop()
         start = time.time()
