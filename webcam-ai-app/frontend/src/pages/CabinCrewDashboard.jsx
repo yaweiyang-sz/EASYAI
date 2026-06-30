@@ -3,6 +3,7 @@ import { AlertTriangle, Shield, ShieldOff, Video, Users, PlaneTakeoff, Plane, Sh
 import { useNavigate } from 'react-router-dom';
 import { cameraApi } from '../services/api';
 import { subscribe } from '../services/streamManager';
+import { base64JpegToObjectUrl, replaceImageObjectUrl, revokeImageObjectUrl } from '../services/frameUtils';
 
 const INITIAL_ALERTS = [
   { id: 1, time: '11:52', type: 'restricted', message: 'Passenger 29B moved towards cockpit area.', resolved: false },
@@ -102,14 +103,7 @@ export default function CabinCrewDashboard() {
       }, 300);
     }
 
-    if (img._objectUrl) URL.revokeObjectURL(img._objectUrl);
-
-    const binaryStr = atob(base64Data);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-    const blob = new Blob([bytes], { type: 'image/jpeg' });
-    img._objectUrl = URL.createObjectURL(blob);
-    img.src = img._objectUrl;
+    replaceImageObjectUrl(img, base64JpegToObjectUrl(base64Data), 250);
   }, []);
 
   const connectCameraWebSocket = useCallback((cameraId) => {
@@ -146,9 +140,7 @@ export default function CabinCrewDashboard() {
   const disconnectAllWebSockets = useCallback(() => {
     Object.entries(unsubscribeRefs.current).forEach(([, unsub]) => unsub?.());
     unsubscribeRefs.current = {};
-    Object.values(imgRefs.current).forEach(img => {
-      if (img?._objectUrl) URL.revokeObjectURL(img._objectUrl);
-    });
+    Object.values(imgRefs.current).forEach(revokeImageObjectUrl);
   }, []);
 
   useEffect(() => {
