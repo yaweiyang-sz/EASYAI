@@ -79,6 +79,7 @@ export default function CabinCrewDashboard() {
   const [loadingCameras, setLoadingCameras] = useState(false);
   const [detectionAlerts, setDetectionAlerts] = useState({});
   const [activeUseCase, setActiveUseCase] = useState('cabin-monitoring');
+  const [navExpanded, setNavExpanded] = useState(false);
 
   const unsubscribeRefs = useRef({});
   const imgRefs = useRef({});
@@ -234,14 +235,14 @@ export default function CabinCrewDashboard() {
                       {[1,2,3,4].map(row => (
                         <div key={row} className="flex flex-col gap-0.5 flex-1">
                           <div className={`flex-[0.5] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`${row}A`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}A</div>
-                          <div className="flex-[0.6] bg-slate-700/30 rounded-lg relative min-h-[16px]">
+                          <div className="flex-[0.6] relative min-h-[16px]">
                             {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'left') && (
                               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
                             )}
                           </div>
                           <div className={`flex-[0.5] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`${row}D`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}D</div>
                           <div className={`flex-[0.5] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`${row}G`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>{row}G</div>
-                          <div className="flex-[0.6] bg-slate-700/30 rounded-lg relative min-h-[16px]">
+                          <div className="flex-[0.6] relative min-h-[16px]">
                             {MOVING_PASSENGERS.find(p => p.position === 'business' && p.row === row && p.side === 'right') && (
                               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
                             )}
@@ -267,7 +268,7 @@ export default function CabinCrewDashboard() {
                         <div key={row} className="flex flex-col gap-0.5 flex-1">
                           <div className={`flex-[0.4] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`e${row}A`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>A</div>
                           <div className={`flex-[0.4] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`e${row}B`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>B</div>
-                          <div className="flex-[0.5] bg-slate-700/30 rounded-lg relative min-h-[14px]">
+                          <div className="flex-[0.5] relative min-h-[14px]">
                             {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && p.side === 'left') && (
                               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
                             )}
@@ -276,7 +277,7 @@ export default function CabinCrewDashboard() {
                           <div className={`flex-[0.4] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`e${row}D`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>D</div>
                           <div className={`flex-[0.4] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`e${row}E`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>E</div>
                           <div className={`flex-[0.4] rounded border flex items-center justify-center text-[5px] font-medium transition-all ${isSeatOccupied(`e${row}F`) ? 'bg-emerald-500/70 border-emerald-400 text-white shadow shadow-emerald-500/30' : 'bg-transparent border-slate-600 text-slate-400'}`}>F</div>
-                          <div className="flex-[0.5] bg-slate-700/30 rounded-lg relative min-h-[14px]">
+                          <div className="flex-[0.5] relative min-h-[14px]">
                             {MOVING_PASSENGERS.find(p => p.position === 'economy' && p.row === row && (p.side === 'right' || p.side === 'middle')) && (
                               <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce shadow shadow-blue-400/50"></div>
                             )}
@@ -307,7 +308,7 @@ export default function CabinCrewDashboard() {
             </div>
           </div>
 
-          <div className="flex-[0.6] lg:flex-[0.8] bg-slate-800 rounded-xl border border-slate-700 p-3 flex flex-col overflow-hidden">
+          <div className="flex-[0.4] sm:flex-[0.5] lg:flex-[0.7] bg-slate-800 rounded-xl border border-slate-700 p-3 flex flex-col overflow-hidden max-h-[160px] lg:max-h-[200px]">
           <div className="flex items-center justify-between mb-3 shrink-0">
             <h2 className="font-semibold flex items-center text-sm"><Video className="w-4 h-4 mr-2 text-blue-400" /> Camera Thumbnails</h2>
             <div className="flex items-center space-x-2">
@@ -325,7 +326,7 @@ export default function CabinCrewDashboard() {
             ) : (
               cameras.map((camera, index) => (
                 <div key={camera.id} className="bg-black rounded-lg border border-slate-700 overflow-hidden cursor-pointer hover:border-blue-500 transition-colors flex-shrink-0 relative"
-                  style={{ aspectRatio: '16/9', width: 'clamp(120px, 22vw, 180px)' }}
+                  style={{ aspectRatio: '16/9', width: 'clamp(90px, 18vw, 140px)' }}
                   onClick={() => navigate(`/camera/${camera.id}`)}>
                   {camera.enabled ? (
                     <>
@@ -392,23 +393,32 @@ export default function CabinCrewDashboard() {
           </div>
         </div>
       </main>
-      <nav className="fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-3xl border border-white/10 bg-slate-950/75 px-4 py-1.5 shadow-2xl shadow-black/40 backdrop-blur-xl">
-        <div className="flex items-end gap-2">
-          {USE_CASES.map(({ id, label, Icon, accent }) => {
+      <nav className={`fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border border-white/10 bg-slate-950/75 shadow-2xl shadow-black/40 backdrop-blur-xl transition-all duration-300 ease-out overflow-hidden cursor-pointer ${navExpanded ? 'h-auto py-2' : 'h-8'}`}
+        style={{ maxWidth: navExpanded ? '360px' : '120px' }}
+        onMouseEnter={() => setNavExpanded(true)}
+        onMouseLeave={() => setNavExpanded(false)}
+        onClick={() => setNavExpanded(!navExpanded)}>
+        <div className={`flex items-center justify-center gap-2 transition-all duration-300 ${navExpanded ? 'opacity-100' : 'opacity-50'}`}>
+          {navExpanded ? USE_CASES.map(({ id, label, Icon, accent }) => {
             const isActive = activeUseCase === id;
             return (
               <button
                 key={id}
-                onClick={() => setActiveUseCase(id)}
-                className={`group flex min-w-[72px] flex-col items-center gap-0.5 rounded-xl px-2 py-1.5 text-[9px] font-semibold transition-all ${isActive ? 'text-white' : 'text-slate-400 hover:text-white'}`}
+                onClick={(e) => { e.stopPropagation(); setActiveUseCase(id); }}
+                className={`group flex min-w-[64px] flex-col items-center gap-0.5 rounded-xl px-2 py-1.5 text-[9px] font-semibold transition-all ${isActive ? 'text-white' : 'text-slate-400 hover:text-white'}`}
                 title={label}
               >
-                <span className={`flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br ${accent} shadow-lg transition-all ${isActive ? '-translate-y-1.5 scale-105 shadow-blue-500/20' : 'group-hover:-translate-y-1 group-hover:scale-105 opacity-80'}`}>
+                <span className={`flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br ${accent} shadow-lg transition-all ${isActive ? '-translate-y-1 scale-105 shadow-blue-500/20' : 'group-hover:-translate-y-1 group-hover:scale-105 opacity-80'}`}>
                   <Icon className="h-4 w-4 text-white" />
                 </span>
                 <span className="leading-tight">{label}</span>
                 {isActive && <span className="h-0.5 w-0.5 rounded-full bg-white" />}
               </button>
+            );
+          }) : USE_CASES.map(({ id, accent }) => {
+            const isActive = activeUseCase === id;
+            return (
+              <div key={id} className={`w-2 h-2 rounded-full bg-gradient-to-br ${accent} transition-all ${isActive ? 'scale-125 opacity-100' : 'opacity-50'}`} />
             );
           })}
         </div>
