@@ -2,8 +2,8 @@
   "cameras": [
     {
       "name": "Cabin Lateral",
-      "source": "rtsp://admin:airbus.123@192.168.10.202:554/video1",
-      "type": "rtsp",
+      "source": "http://host.docker.internal:9000/stream/webcam0",
+      "type": "integrated",
       "enabled": true,
       "id": "f837253d-9cb5-4946-8702-aa396c6df4f2",
       "algorithms": [
@@ -11,21 +11,16 @@
           "id": "algo_1781352277453",
           "name": "Person Detection",
           "algorithm_type": "object_detection",
-          "enabled": true,
+          "enabled": false,
           "confidence": 0.2,
-          "roi": {
-            "x1": 25,
-            "y1": 169,
-            "x2": 192,
-            "y2": 303
-          },
+          "roi": null,
           "classes": []
         }
       ]
     },
     {
       "name": "Cabin Lavatory",
-      "source": "rtsp://admin:airbus.123@192.168.10.201:554/video1",
+      "source": "http://host.docker.internal:9000/stream/localvideo0",
       "type": "rtsp",
       "enabled": true,
       "id": "72feebca-04c0-410d-9488-81b54bffe503",

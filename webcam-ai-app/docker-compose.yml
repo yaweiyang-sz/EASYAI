@@ -1,17 +1,14 @@
-version: '3.8'
-
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: webcam-ai-app-backend
     container_name: camera-ai-backend
     ports:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      - ./backend/data:/app/data
+      - ./backend:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
     networks:
       - camera-ai-network
@@ -19,36 +16,40 @@ services:
       - "host.docker.internal:host-gateway"
 
   ai-service:
-    build:
-      context: ./ai-service
-      dockerfile: Dockerfile
+    image: webcam-ai-app-ai-service
     container_name: camera-ai-service
     ports:
       - "8001:8001"
     environment:
       - PYTHONUNBUFFERED=1
     volumes:
-      - ai-models:/root/.cache/torch
+      - ./ai-service:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
     restart: unless-stopped
     networks:
       - camera-ai-network
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: node:18-alpine
     container_name: camera-ai-frontend
     ports:
       - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     depends_on:
       - backend
       - ai-service
     restart: unless-stopped
     networks:
       - camera-ai-network
+    environment:
+      - NODE_ENV=development
 
 volumes:
-  ai-models:
+  frontend-node-modules:
 
 networks:
   camera-ai-network:

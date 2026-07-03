@@ -12,13 +12,13 @@ async function fetchWithError(url, options = {}) {
 }
 
 export const cameraApi = {
-  list: () => fetchWithError(`${API_BASE}/cameras`),
+  list: () => fetchWithError(`${API_BASE}/cameras/`),
 
   get: (id) => fetchWithError(`${API_BASE}/cameras/${id}`),
 
   listDevices: () => fetchWithError(`${API_BASE}/cameras/devices`),
 
-  create: (data) => fetchWithError(`${API_BASE}/cameras`, {
+  create: (data) => fetchWithError(`${API_BASE}/cameras/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data)

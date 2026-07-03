@@ -5,7 +5,7 @@ from services.camera_service import camera_service
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
-@router.get("/devices/")
+@router.get("/devices")
 async def list_devices():
     """List available camera devices"""
     try:

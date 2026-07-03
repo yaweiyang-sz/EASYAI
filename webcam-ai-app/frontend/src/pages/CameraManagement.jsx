@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { ArrowLeft } from 'lucide-react'
 import { cameraApi } from '../services/api'
 
 function CameraManagement() {
+  const navigate = useNavigate()
   const [cameras, setCameras] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -110,7 +113,12 @@ function CameraManagement() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-        <h2 className="page-title" style={{ marginBottom: 0 }}>Camera Management</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <button onClick={() => navigate('/')} className="btn btn-secondary" style={{ padding: '0.5rem' }}>
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <h2 className="page-title" style={{ marginBottom: 0 }}>Camera Management</h2>
+        </div>
         <button className="btn btn-primary" onClick={openModal}>
           Add Camera
         </button>

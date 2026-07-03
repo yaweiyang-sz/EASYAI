@@ -11,7 +11,7 @@ import numpy as np
 import time
 import threading
 import os
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import datetime
 
 # Global variables
@@ -283,7 +283,7 @@ class SimpleCameraServer:
         self.running = True
         
         try:
-            self.http_server = HTTPServer(('0.0.0.0', self.port), CameraRequestHandler)
+            self.http_server = ThreadingHTTPServer(('0.0.0.0', self.port), CameraRequestHandler)
             
             print()
             print("=" * 60)
