@@ -4,6 +4,11 @@ import { useNavigate } from 'react-router-dom';
 import { cameraApi } from '../services/api';
 import { subscribe } from '../services/streamManager';
 import { base64JpegToObjectUrl, replaceImageObjectUrl, revokeImageObjectUrl } from '../services/frameUtils';
+<<<<<<< HEAD
+=======
+import CameraManagement from './CameraManagement';
+import AIProcessing from './AIProcessing';
+>>>>>>> 863d6fe979ba6820bb3053915ecf713548b43427
 
 const INITIAL_ALERTS = [
   { id: 1, time: '11:52', type: 'restricted', message: 'Passenger 29B moved towards cockpit area.', resolved: false },

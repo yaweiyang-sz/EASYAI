@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { cameraApi, aiApi } from '../services/api'
 import { subscribe, isConnected } from '../services/streamManager'
+import { base64JpegToObjectUrl, revokeImageObjectUrl, replaceImageObjectUrl, base64JpegToDataUrl } from '../services/frameUtils'
 
 // Module-level cache: persists across SPA navigations (not across F5)
 const frameCache = { data: null, cameraId: null }
@@ -29,17 +30,11 @@ function CameraView() {
   const imgRef = useRef(null)
   const placeholderRef = useRef(null)
   const unsubscribeRef = useRef(null)
+  const updateDebounceRef = useRef(null)
+  const latestAlgorithmsRef = useRef([])
   const mountedRef = useRef(true)
   const streamStateRef = useRef({ detections: [], lastDetectionUpdate: 0 })
   const frameCacheUsedRef = useRef(false)
-
-  // ── Decode base64 → blob URL ──
-  const base64ToObjectUrl = useCallback((base64Data) => {
-    const binaryStr = atob(base64Data)
-    const bytes = new Uint8Array(binaryStr.length)
-    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
-    return URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
-  }, [])
 
   const hidePlaceholder = useCallback(() => {
     const el = placeholderRef.current
@@ -55,18 +50,12 @@ function CameraView() {
       return
     }
     hidePlaceholder()
-    const newUrl = base64ToObjectUrl(base64Data)
-    const prevUrl = img._objectUrl
-    img._objectUrl = newUrl
-    img.src = newUrl
-    if (prevUrl) {
-      img.onload = () => { URL.revokeObjectURL(prevUrl); img.onload = null }
-    }
+    replaceImageObjectUrl(img, base64JpegToObjectUrl(base64Data), 250)
     if (!isCache) {
       frameCache.data = base64Data
       frameCache.cameraId = id
     }
-  }, [id, base64ToObjectUrl, hidePlaceholder])
+  }, [id, hidePlaceholder])
 
   // Stable ref so streamManager's onFrame callback never captures a stale closure
   const renderFrameRef = useRef(renderFrame)
@@ -77,12 +66,10 @@ function CameraView() {
     if (!el) return
     if (!frameCacheUsedRef.current && frameCache.cameraId === id && frameCache.data) {
       frameCacheUsedRef.current = true
-      const url = base64ToObjectUrl(frameCache.data)
-      el._objectUrl = url
-      el.src = url
+      replaceImageObjectUrl(el, base64JpegToObjectUrl(frameCache.data))
       requestAnimationFrame(() => hidePlaceholder())
     }
-  }, [id, base64ToObjectUrl, hidePlaceholder])
+  }, [id, hidePlaceholder])
 
   // ── WebSocket via shared streamManager ──
   const connectWebSocket = useCallback(() => {
@@ -122,9 +109,15 @@ function CameraView() {
     return () => {
       mountedRef.current = false
       disconnectWebSocket()
-      if (imgRef.current?._objectUrl) URL.revokeObjectURL(imgRef.current._objectUrl)
+      // Do not clear a pending debounced save here: it is safe to finish in
+      // the background and prevents losing a last-second settings edit on navigation.
+      revokeImageObjectUrl(imgRef.current)
     }
   }, [id])
+
+  useEffect(() => {
+    if (camera?.algorithms) latestAlgorithmsRef.current = camera.algorithms
+  }, [camera])
 
   useEffect(() => {
     if (selectedAlgoConfig) loadClasses(selectedAlgoConfig.algorithm_type)
@@ -134,6 +127,7 @@ function CameraView() {
     try {
       const data = await cameraApi.get(id)
       if (!mountedRef.current) return
+      latestAlgorithmsRef.current = data.algorithms || []
       setCamera(data)
       if (data.algorithms?.length) setSelectedAlgoConfig(data.algorithms[0])
     } catch (err) {
@@ -151,16 +145,24 @@ function CameraView() {
     try { const d = await aiApi.getClasses(t); if (mountedRef.current) setClasses(d.classes) } catch (e) {}
   }
 
-  const updateAlgoConfig = async (newConfig) => {
+  const updateAlgoConfig = useCallback((newConfig, { persistImmediately = false } = {}) => {
+    const updatedAlgorithms = latestAlgorithmsRef.current.map(a => a.id === newConfig.id ? newConfig : a)
+    latestAlgorithmsRef.current = updatedAlgorithms
     setSelectedAlgoConfig(newConfig)
-    if (camera) {
-      const updatedAlgos = camera.algorithms.map(a => a.id === newConfig.id ? newConfig : a)
+    setCamera(prev => prev ? { ...prev, algorithms: updatedAlgorithms } : prev)
+
+    if (updateDebounceRef.current) clearTimeout(updateDebounceRef.current)
+
+    const persist = async () => {
+      updateDebounceRef.current = null
       try {
-        await cameraApi.update(id, { algorithms: updatedAlgos })
-        setCamera(prev => ({ ...prev, algorithms: updatedAlgos }))
+        await cameraApi.update(id, { algorithms: updatedAlgorithms })
       } catch (err) { console.error('Failed to update camera:', err) }
     }
-  }
+
+    if (persistImmediately) persist()
+    else updateDebounceRef.current = setTimeout(persist, 400)
+  }, [id])
 
   const captureAndProcess = async () => {
     if (!selectedAlgoConfig) return
@@ -200,7 +202,7 @@ function CameraView() {
               if (!roiStart) { setRoiStart(cp); setRoiEnd(null) }
               else {
                 const x1 = Math.min(roiStart.x, cp.x), y1 = Math.min(roiStart.y, cp.y), x2 = Math.max(roiStart.x, cp.x), y2 = Math.max(roiStart.y, cp.y)
-                if (x2 - x1 > 10 && y2 - y1 > 10 && selectedAlgoConfig) updateAlgoConfig({ ...selectedAlgoConfig, roi: { x1, y1, x2, y2 } })
+                if (x2 - x1 > 10 && y2 - y1 > 10 && selectedAlgoConfig) updateAlgoConfig({ ...selectedAlgoConfig, roi: { x1, y1, x2, y2 } }, { persistImmediately: true })
                 setRoiStart(null); setRoiEnd(null); setRoiMode(false)
               }
             }}
@@ -268,7 +270,7 @@ function CameraView() {
                 <div className="settings-row"><label className="setting-label">Confidence: {selectedAlgoConfig.confidence.toFixed(2)}</label><input type="range" min="0" max="1" step="0.05" value={selectedAlgoConfig.confidence} onChange={(e) => updateAlgoConfig({ ...selectedAlgoConfig, confidence: parseFloat(e.target.value) })} className="settings-slider" /></div>
                 <div className="settings-row roi-section">
                   <button className={`btn btn-small ${roiMode ? 'btn-primary active' : 'btn-secondary'}`} onClick={() => { setRoiMode(!roiMode); if (roiMode) { setRoiStart(null); setRoiEnd(null) } }}>{roiMode ? 'Cancel ROI' : 'Draw ROI'}</button>
-                  {selectedAlgoConfig.roi && <button className="btn btn-small btn-danger" onClick={() => { updateAlgoConfig({ ...selectedAlgoConfig, roi: null }); setRoiMode(false); setRoiStart(null); setRoiEnd(null) }}>Clear ROI</button>}
+                  {selectedAlgoConfig.roi && <button className="btn btn-small btn-danger" onClick={() => { updateAlgoConfig({ ...selectedAlgoConfig, roi: null }, { persistImmediately: true }); setRoiMode(false); setRoiStart(null); setRoiEnd(null) }}>Clear ROI</button>}
                 </div>
                 {selectedAlgoConfig.roi && (<div className="roi-info"><span className="roi-label">ROI: </span><span className="roi-coords">({selectedAlgoConfig.roi.x1}, {selectedAlgoConfig.roi.y1}) - ({selectedAlgoConfig.roi.x2}, {selectedAlgoConfig.roi.y2})</span></div>)}
                 {selectedAlgoConfig.algorithm_type === 'object_detection' && classes.length > 0 && (
@@ -315,7 +317,7 @@ function CameraView() {
                   </div>
                 </div>
               )}
-              {results.annotated_frame && (<div className="annotated-image"><h4>Annotated Image</h4><img src={`data:image/jpeg;base64,${results.annotated_frame}`} alt="Annotated" className="annotated-img" /></div>)}
+              {results.annotated_frame && (<div className="annotated-image"><h4>Annotated Image</h4><img src={base64JpegToDataUrl(results.annotated_frame)} alt="Annotated" className="annotated-img" loading="lazy" /></div>)}
             </div>
           )}
 

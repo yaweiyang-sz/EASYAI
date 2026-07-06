@@ -29,7 +29,10 @@ export function replaceImageObjectUrl(image, objectUrl, revokeDelay = 0) {
 
 export function revokeImageObjectUrl(image) {
   if (!image?._objectUrl) return;
+<<<<<<< HEAD
 
+=======
+>>>>>>> 863d6fe979ba6820bb3053915ecf713548b43427
   URL.revokeObjectURL(image._objectUrl);
   image._objectUrl = null;
 }
